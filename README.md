@@ -77,8 +77,8 @@ flowchart LR
         RX[GPIO16 · RX]
     end
     subgraph RS485["TTL-to-RS485 module (JZK STKS, auto-direction)"]
-        DI[DI]
-        RO[RO]
+        RXD[RXD]
+        TXD[TXD]
         A[A]
         B[B]
         GNDm[GND]
@@ -90,8 +90,8 @@ flowchart LR
     end
     BMS["JK BMS RS485 port (RJ45)"]
 
-    TX -->|TX → DI| DI
-    RO -->|RO → RX| RX
+    TX -->|TX → RXD| RXD
+    TXD -->|TXD → RX| RX
     A --> P1
     B --> P2
     GNDm --> P3
@@ -100,13 +100,19 @@ flowchart LR
 
 | ESP32 | Module | Cat5 pin | Wire |
 |---|---|---|---|
-| GPIO17 (TX) | DI | — | — |
-| GPIO16 (RX) | RO | — | — |
+| GPIO17 (TX) | RXD | — | — |
+| GPIO16 (RX) | TXD | — | — |
 | 3V3/5V | VCC | — | — |
 | GND | GND | — | — |
 | — | A | pin 1 | orange |
 | — | B | pin 2 | orange/white |
 | — | GND | pin 3 | green |
+
+Note the crossover: ESP32 **TX** goes to the module's **RXD**, and ESP32 **RX** goes to the
+module's **TXD** — same as wiring up any two UART devices. Some modules label these pins `DI`/`RO`
+instead (from the RS485 driver chip's own perspective rather than the UART side) — if yours does,
+`DI` is what's labeled `RXD` here and `RO` is `TXD`. Either way: connect TX to whichever pin feeds
+into the module, and RX to whichever pin comes out of it.
 
 Using an old-style MAX485 module instead? Add a `GPIO4 → DE + RE (tied together)` connection and
 set `de_pin: GPIO4` in the YAML (see [Configuration reference](#configuration-reference)).
@@ -114,7 +120,7 @@ set `de_pin: GPIO4` in the YAML (see [Configuration reference](#configuration-re
 The Cat5 cable's other end is a standard, unmodified RJ45 plug into the BMS's RS485 port — same
 connector the JK Windows tool or Solar Assistant would use.
 
-> Check your specific module's datasheet before tying VCC to 3.3V — most read DI/RO (and DE/RE,
+> Check your specific module's datasheet before tying VCC to 3.3V — most read RXD/TXD (and DE/RE,
 > if present) fine at 3.3V logic even when VCC itself needs 5V, but that varies by board.
 >
 > Unlike the M5Stack RS485 base (which has internal pulldowns), a bare RS485 module needs the
@@ -125,11 +131,11 @@ connector the JK Windows tool or Solar Assistant would use.
 Tools: soldering iron + solder, wire strippers, heat-shrink tubing (or electrical tape), a
 multimeter for continuity checks, and a lighter/heat gun for the heat-shrink.
 
-1. **ESP32 → module.** If your module only has bare through-hole pads for DI/RO/VCC/GND, solder
-   short wires (or a 4-pin header, if you'd rather use Dupont jumpers) onto DI, RO, VCC and GND.
-   Solder the other ends directly to the ESP32's GPIO17, GPIO16, 3V3/5V and GND pins, or to
-   headers on the dev board if it has them — no need to solder straight to the board itself if
-   pin headers are already populated.
+1. **ESP32 → module.** If your module only has bare through-hole pads for RXD/TXD/VCC/GND
+   (labeled `DI`/`RO` on some boards), solder short wires (or a 4-pin header, if you'd rather use
+   Dupont jumpers) onto those four pads. Solder the other ends to the ESP32's GPIO17 (TX) →
+   module RXD/DI, GPIO16 (RX) → module TXD/RO, 3V3/5V → VCC and GND → GND — or to headers on the
+   dev board if it has them already, no need to solder straight to the board itself.
 2. **Prepare the Cat5 cable.** Cut a Cat5/Cat5e cable roughly in half. On the BMS end, leave the
    factory RJ45 plug untouched. On the module end, strip ~3cm of outer jacket, untwist the pairs,
    and identify pins 1 (orange), 2 (orange/white) and 3 (green) by the standard T568 colors. You
