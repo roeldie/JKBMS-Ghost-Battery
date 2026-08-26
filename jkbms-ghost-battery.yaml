@@ -1,0 +1,87 @@
+esphome:
+  name: jkbms-ghost-battery
+  friendly_name: JKBMS Ghost Battery
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# fill in your own network/API/OTA secrets (eg. via secrets.yaml)
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+logger:
+  level: DEBUG  # set to INFO once you've confirmed pack1/pack2 detection and thresholds
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# points at the components/ folder next to this yaml file
+external_components:
+  - source:
+      type: local
+      path: components
+
+uart:
+  id: jkbms_uart
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 115200
+  data_bits: 8
+  parity: NONE
+  stop_bits: 1
+
+jkbms_ghost_battery:
+  uart_id: jkbms_uart
+  # de_pin is optional. Leave it out for an auto-direction module like the JZK STKS
+  # TTL-to-RS485 board (what this config is set up for) - it senses direction itself.
+  # If you use an old-style MAX485 module with separate DE+RE pins instead, uncomment this
+  # and wire it to the tied-together DE+RE pins:
+  # de_pin: GPIO4
+  ghost_address: 15      # RS485 address to spoof - must have no physical battery here
+  pack1_address: 0       # real pack 1 / master BMS RS485 address - verify your dip switch setting
+  pack2_address: 1       # real pack 2 RS485 address - verify your dip switch setting
+  cell_full_low_mv: 3460       # every cell on both packs must be >= this voltage (mV)...
+  cell_balance_tolerance_mv: 20 # ...AND each pack's own max-min cell spread must be within this
+                                 # many mV - together, "full" and "balanced"
+  reset_soc_percent: 99   # once released, ghost drops back to 0% as soon as pack1 or pack2's own
+                           # reported SoC falls to this percentage (ie. discharging has started)
+  hold_failsafe_minutes: 240  # safety backstop: release to 100% after this long even without
+                               # confirmed balance, so a wiring/address mistake can't cause
+                               # indefinite overcharge. Set to 0 to disable.
+
+sensor:
+  - platform: jkbms_ghost_battery
+    pack1_min_cell_voltage:
+      name: "Pack 1 min cell voltage"
+    pack1_max_cell_voltage:
+      name: "Pack 1 max cell voltage"
+    pack2_min_cell_voltage:
+      name: "Pack 2 min cell voltage"
+    pack2_max_cell_voltage:
+      name: "Pack 2 max cell voltage"
+    pack1_soc:
+      name: "Pack 1 SoC"
+    pack2_soc:
+      name: "Pack 2 SoC"
+    ghost_fake_soc:
+      name: "Ghost fake SoC"   # what the ghost is currently telling the bus: 0 or 100
+
+switch:
+  - platform: jkbms_ghost_battery
+    # arm this first (in Home Assistant) - while off, "Manual force full" below has no effect
+    # and the automatic cell-balance logic keeps running normally. Always starts off on boot.
+    manual_override_armed:
+      name: "Ghost manual override armed"
+      restore_mode: ALWAYS_OFF
+    # only takes effect once "armed" above is on: on = force ghost to 100%, off = force to 0%
+    manual_force_full:
+      name: "Ghost force 100%"
+      restore_mode: ALWAYS_OFF
