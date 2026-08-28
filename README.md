@@ -47,6 +47,12 @@ since the logic is identical either way, minus pack 2 in single-pack mode:
 5. `hold_failsafe_minutes` (default 240) is a safety backstop: if balance/full can never be
    confirmed (wrong address, wiring problem), the hold releases anyway after this long, so a
    configuration mistake can't cause indefinite overcharge. Set to `0` to disable.
+6. `pack_stale_timeout_seconds` (default 30) guards against acting on stale data: if a configured
+   pack hasn't sent a fresh status frame within this window (BMS reset, wiring fault, pack
+   physically disconnected), its last cached reading is no longer trusted — the ghost won't
+   release on the strength of it, and if it had already released, it re-arms back to holding as a
+   precaution. Real packs are normally polled every few seconds, so this should stay well above
+   that under normal conditions.
 
 ## ⚠️ Safety notes
 
@@ -161,9 +167,10 @@ multimeter for continuity checks, and a lighter/heat gun for the heat-shrink.
 1. Copy this whole folder (including `components/`) into your ESPHome Dashboard's config
    directory, eg. `/config/esphome/`, keeping the folder structure intact — `external_components`
    in the YAML resolves `path: components` relative to the YAML file.
-2. Copy `secrets.yaml` alongside it (or merge its keys into your existing one) and fill in your
-   real WiFi credentials, a generated API encryption key, an OTA password, and a fallback AP
-   password (`ap_fallback_password`, min. 8 characters).
+2. Copy `secrets.yaml.example` to `secrets.yaml` alongside it (or merge its keys into your
+   existing one) and fill in your real WiFi credentials, a generated API encryption key, an OTA
+   password, and a fallback AP password (`ap_fallback_password`, min. 8 characters).
+   `secrets.yaml` itself is gitignored - never commit your real credentials.
 3. In the ESPHome Dashboard, open `jkbms-ghost-battery.yaml` and click **Validate** — it should
    list the full resolved config ending in `Configuration is valid!` with no errors. If it can't
    find the component, double check the folder name is exactly `components/jkbms_ghost_battery/`
@@ -195,6 +202,8 @@ jkbms_ghost_battery:
                                  # many mV - together, "full" and "balanced"
   reset_soc_percent: 99   # re-arms the hold once pack1 or pack2's real SoC drops to this value
   hold_failsafe_minutes: 240  # safety backstop; releases anyway if balance is never confirmed. 0 disables it
+  pack_stale_timeout_seconds: 30  # a pack with no fresh data for this long is treated as unusable -
+                                   # release is refused, and an already-released hold re-arms
 
 sensor:
   - platform: jkbms_ghost_battery

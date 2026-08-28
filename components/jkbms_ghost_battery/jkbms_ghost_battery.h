@@ -32,6 +32,10 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   void set_cell_balance_tolerance_mv(uint16_t mv) { this->cell_balance_tolerance_mv_ = mv; }
   void set_reset_soc_percent(uint8_t percent) { this->reset_soc_percent_ = percent; }
   void set_hold_failsafe_ms(uint32_t ms) { this->hold_failsafe_ms_ = ms; }
+  // if a configured pack hasn't produced a fresh status frame in this long, its cached
+  // cell/SoC data is treated as unusable: release is refused, and an already-released hold
+  // re-arms defensively (see evaluate_hold_())
+  void set_pack_stale_timeout_ms(uint32_t ms) { this->pack_stale_timeout_ms_ = ms; }
 
   void set_pack1_min_cell_voltage_sensor(sensor::Sensor *s) { this->pack1_min_cell_voltage_sensor_ = s; }
   void set_pack1_max_cell_voltage_sensor(sensor::Sensor *s) { this->pack1_max_cell_voltage_sensor_ = s; }
@@ -97,6 +101,7 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   uint16_t cell_balance_tolerance_mv_{20};
   uint8_t reset_soc_percent_{99};
   uint32_t hold_failsafe_ms_{0};
+  uint32_t pack_stale_timeout_ms_{30000};
 
   uint8_t buf_[JK_FRAME_SIZE];
   uint16_t num_bytes_{0};
@@ -109,6 +114,10 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   uint32_t hold_start_time_{0};
 
   bool pack1_seen_{false}, pack2_seen_{false};
+  // millis() timestamp of the last frame2 status packet seen from each pack - used to detect a
+  // pack that has gone silent (wiring fault, BMS reset, pack physically removed) so its last
+  // cached reading isn't trusted indefinitely. See evaluate_hold_().
+  uint32_t pack1_last_update_ms_{0}, pack2_last_update_ms_{0};
   uint16_t pack1_min_mv_{0}, pack1_max_mv_{0};
   uint16_t pack2_min_mv_{0}, pack2_max_mv_{0};
   uint8_t pack1_soc_{0}, pack2_soc_{0};

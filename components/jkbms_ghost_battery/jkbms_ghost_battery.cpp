@@ -58,6 +58,7 @@ void JkBmsGhostBattery::dump_config() {
   ESP_LOGCONFIG(TAG, "  Cell balance tolerance: %u mV", this->cell_balance_tolerance_mv_);
   ESP_LOGCONFIG(TAG, "  Reset SoC: %u%%", this->reset_soc_percent_);
   ESP_LOGCONFIG(TAG, "  Hold failsafe: %u min", (unsigned) (this->hold_failsafe_ms_ / 60000));
+  ESP_LOGCONFIG(TAG, "  Pack data stale timeout: %u s", (unsigned) (this->pack_stale_timeout_ms_ / 1000));
   LOG_PIN("  DE Pin: ", this->de_pin_);
   LOG_SENSOR("  ", "Pack 1 min cell voltage", this->pack1_min_cell_voltage_sensor_);
   LOG_SENSOR("  ", "Pack 1 max cell voltage", this->pack1_max_cell_voltage_sensor_);
@@ -99,6 +100,14 @@ void JkBmsGhostBattery::loop() {
     this->handle_frame_();
     this->num_bytes_ = 0;
   }
+
+  // Re-check staleness even when nothing arrived this tick: evaluate_hold_() is otherwise only
+  // reached from sniff_real_pack_() below, ie. only when at least one real pack is still talking.
+  // If ALL configured packs go completely silent while released (total bus/wiring failure), that
+  // path would never fire again and the ghost would keep reporting 100% forever. This unconditional
+  // call is cheap (a few integer comparisons, no I/O) and lets the staleness check in
+  // evaluate_hold_() catch that case too.
+  this->evaluate_hold_();
 }
 
 void JkBmsGhostBattery::handle_frame_() {
@@ -135,11 +144,20 @@ bool JkBmsGhostBattery::is_query_for_us_() {
 
 void JkBmsGhostBattery::send_frame1_() {
   memcpy(this->buf_, FRAME1_RESPONSE, JK_FRAME_SIZE);
+  // the captured template hardcodes its source pack's own address (0x0F) at this offset; patch
+  // it to whatever ghost_address is actually configured so the frame is internally consistent
+  this->buf_[SOURCE_ADDRESS_OFFSET] = this->ghost_address_;
   this->send_response_(JK_FRAME_SIZE);
 }
 
 void JkBmsGhostBattery::send_frame2_() {
   memcpy(this->buf_, FRAME2_RESPONSE, JK_FRAME_SIZE);
+
+  // the captured template hardcodes its source pack's own address (0x0F) at this offset; patch
+  // it to whatever ghost_address is actually configured. Only matters when ghost_address is set
+  // to something other than the default 15 - otherwise this is a no-op, since 15 == 0x0F is
+  // exactly what the template already contains. Must happen before the checksum recompute below.
+  this->buf_[SOURCE_ADDRESS_OFFSET] = this->ghost_address_;
 
   // TEST: hold the ghost's reported SoC at 0% until both real packs are confirmed full and
   // balanced (see evaluate_hold_()); then switch to 100%/full so the inverter gets a genuine
@@ -192,6 +210,9 @@ void JkBmsGhostBattery::send_frame2_() {
 
 void JkBmsGhostBattery::send_frame3_() {
   memcpy(this->buf_, FRAME3_RESPONSE, JK_FRAME_SIZE);
+  // the captured template hardcodes its source pack's own address (0x0F) at this offset; patch
+  // it to whatever ghost_address is actually configured so the frame is internally consistent
+  this->buf_[SOURCE_ADDRESS_OFFSET] = this->ghost_address_;
   this->send_response_(JK_FRAME_SIZE);
 }
 
@@ -257,6 +278,7 @@ void JkBmsGhostBattery::sniff_real_pack_() {
     this->pack1_current_ma_ = current_ma;
     this->pack1_temperature_c10_ = temperature_c10;
     this->pack1_seen_ = true;
+    this->pack1_last_update_ms_ = millis();
     if (this->pack1_min_cell_voltage_sensor_ != nullptr) this->pack1_min_cell_voltage_sensor_->publish_state(min_mv / 1000.0f);
     if (this->pack1_max_cell_voltage_sensor_ != nullptr) this->pack1_max_cell_voltage_sensor_->publish_state(max_mv / 1000.0f);
     if (this->pack1_cell_voltage_diff_sensor_ != nullptr) this->pack1_cell_voltage_diff_sensor_->publish_state((max_mv - min_mv) / 1000.0f);
@@ -278,6 +300,7 @@ void JkBmsGhostBattery::sniff_real_pack_() {
     this->pack2_current_ma_ = current_ma;
     this->pack2_temperature_c10_ = temperature_c10;
     this->pack2_seen_ = true;
+    this->pack2_last_update_ms_ = millis();
     if (this->pack2_min_cell_voltage_sensor_ != nullptr) this->pack2_min_cell_voltage_sensor_->publish_state(min_mv / 1000.0f);
     if (this->pack2_max_cell_voltage_sensor_ != nullptr) this->pack2_max_cell_voltage_sensor_->publish_state(max_mv / 1000.0f);
     if (this->pack2_cell_voltage_diff_sensor_ != nullptr) this->pack2_cell_voltage_diff_sensor_->publish_state((max_mv - min_mv) / 1000.0f);
@@ -322,32 +345,49 @@ void JkBmsGhostBattery::sniff_real_pack_() {
   ESP_LOGD(TAG, "Pack 0x%02X cells: %u-%u mV, SoC %u%%, %.2fV, %.2fA, %.1fC",
            source_address, min_mv, max_mv, soc, voltage_mv / 1000.0f, current_ma / 1000.0f, temperature_c10 / 10.0f);
 
-  this->evaluate_hold_();
+  // evaluate_hold_() is also called unconditionally at the end of loop() (so total silence from
+  // every pack is caught too) - no need to call it again here as well.
 }
 
 void JkBmsGhostBattery::evaluate_hold_() {
+  uint32_t now = millis();
+  // "fresh" means we've seen this pack at least once AND its last update wasn't too long ago -
+  // guards against evaluating full/balanced (or re-arm) decisions off a stale cached reading from
+  // a pack that has since gone silent (wiring fault, BMS reset, pack physically disconnected).
+  bool pack1_fresh = this->pack1_seen_ && (now - this->pack1_last_update_ms_) < this->pack_stale_timeout_ms_;
+  // in single-pack mode (pack_count_ == 1), pack2 is never required, so it's vacuously "fresh"
+  bool pack2_fresh = this->pack_count_ < 2 ||
+                      (this->pack2_seen_ && (now - this->pack2_last_update_ms_) < this->pack_stale_timeout_ms_);
+
   if (this->holding_) {
-    bool pack1_ok = this->pack1_seen_ && this->pack1_min_mv_ >= this->cell_full_low_mv_ &&
+    bool pack1_ok = pack1_fresh && this->pack1_min_mv_ >= this->cell_full_low_mv_ &&
                      (this->pack1_max_mv_ - this->pack1_min_mv_) <= this->cell_balance_tolerance_mv_;
-    // in single-pack mode (pack_count_ == 1), pack2 is never required
     bool pack2_ok = this->pack_count_ < 2 ||
-                    (this->pack2_seen_ && this->pack2_min_mv_ >= this->cell_full_low_mv_ &&
+                    (pack2_fresh && this->pack2_min_mv_ >= this->cell_full_low_mv_ &&
                      (this->pack2_max_mv_ - this->pack2_min_mv_) <= this->cell_balance_tolerance_mv_);
 
     if (pack1_ok && pack2_ok) {
       this->holding_ = false;
       ESP_LOGI(TAG, "Pack(s) balanced (<=%u mV spread) and full (>=%u mV) - releasing ghost SoC to 100%%",
                this->cell_balance_tolerance_mv_, this->cell_full_low_mv_);
-    } else if (this->hold_failsafe_ms_ > 0 && (millis() - this->hold_start_time_) >= this->hold_failsafe_ms_) {
+    } else if (this->hold_failsafe_ms_ > 0 && (now - this->hold_start_time_) >= this->hold_failsafe_ms_) {
       this->holding_ = false;
       ESP_LOGW(TAG, "SoC hold failsafe reached - releasing to 100%% without confirmed balance");
     }
   } else {
     bool pack2_low = this->pack_count_ >= 2 && this->pack2_seen_ && this->pack2_soc_ <= this->reset_soc_percent_;
-    if ((this->pack1_seen_ && this->pack1_soc_ <= this->reset_soc_percent_) || pack2_low) {
+    bool went_stale = !pack1_fresh || !pack2_fresh;
+    if ((this->pack1_seen_ && this->pack1_soc_ <= this->reset_soc_percent_) || pack2_low || went_stale) {
       this->holding_ = true;
-      this->hold_start_time_ = millis();
-      ESP_LOGI(TAG, "Real pack SoC reached %u%% - re-arming ghost SoC hold to 0%%", this->reset_soc_percent_);
+      this->hold_start_time_ = now;
+      if (went_stale) {
+        // defensive re-arm: we can no longer confirm the pack(s) are actually still full/balanced,
+        // so don't keep telling the bus 100% on the strength of a reading that's no longer trusted
+        ESP_LOGW(TAG, "Real pack data went stale (no update for >=%u ms) - re-arming ghost SoC hold to 0%% as a precaution",
+                 (unsigned) this->pack_stale_timeout_ms_);
+      } else {
+        ESP_LOGI(TAG, "Real pack SoC reached %u%% - re-arming ghost SoC hold to 0%%", this->reset_soc_percent_);
+      }
     }
   }
 }

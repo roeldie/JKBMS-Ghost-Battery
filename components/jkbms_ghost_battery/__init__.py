@@ -23,8 +23,33 @@ CONF_CELL_FULL_LOW_MV = "cell_full_low_mv"
 CONF_CELL_BALANCE_TOLERANCE_MV = "cell_balance_tolerance_mv"
 CONF_RESET_SOC_PERCENT = "reset_soc_percent"
 CONF_HOLD_FAILSAFE_MINUTES = "hold_failsafe_minutes"
+CONF_PACK_STALE_TIMEOUT_SECONDS = "pack_stale_timeout_seconds"
 
-CONFIG_SCHEMA = (
+
+def _validate_unique_addresses(config):
+    pack_count = config[CONF_PACK_COUNT]
+    addresses = [
+        (CONF_GHOST_ADDRESS, config[CONF_GHOST_ADDRESS]),
+        (CONF_PACK1_ADDRESS, config[CONF_PACK1_ADDRESS]),
+    ]
+    # pack2_address is only meaningful (and only needs to be distinct) in 2-pack mode - in
+    # single-pack mode it's ignored entirely by the component, so a collision there is harmless
+    if pack_count >= 2:
+        addresses.append((CONF_PACK2_ADDRESS, config[CONF_PACK2_ADDRESS]))
+
+    seen = {}
+    for key, address in addresses:
+        if address in seen:
+            raise cv.Invalid(
+                f"'{key}' and '{seen[address]}' are both set to address {address} - the "
+                "ghost, pack 1 and pack 2 each need their own unique RS485 address, or the "
+                "ghost and a real pack will collide on the bus"
+            )
+        seen[address] = key
+    return config
+
+
+CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(JkBmsGhostBattery),
@@ -47,10 +72,17 @@ CONFIG_SCHEMA = (
             # cell balance, so a wiring/address mistake can't cause indefinite overcharge.
             # set to 0 to disable.
             cv.Optional(CONF_HOLD_FAILSAFE_MINUTES, default=240): cv.int_range(min=0, max=1440),
+            # if a configured pack hasn't sent a fresh status frame in this long, its cached
+            # reading is no longer trusted: release is refused, and an already-released hold
+            # re-arms as a precaution (wiring fault, BMS reset, pack physically disconnected).
+            # Real packs are normally polled every few seconds, so this should stay well above
+            # that under normal conditions.
+            cv.Optional(CONF_PACK_STALE_TIMEOUT_SECONDS, default=30): cv.int_range(min=5, max=600),
         }
     )
     .extend(uart.UART_DEVICE_SCHEMA)
-    .extend(cv.COMPONENT_SCHEMA)
+    .extend(cv.COMPONENT_SCHEMA),
+    _validate_unique_addresses,
 )
 
 
@@ -71,3 +103,4 @@ async def to_code(config):
     cg.add(var.set_cell_balance_tolerance_mv(config[CONF_CELL_BALANCE_TOLERANCE_MV]))
     cg.add(var.set_reset_soc_percent(config[CONF_RESET_SOC_PERCENT]))
     cg.add(var.set_hold_failsafe_ms(config[CONF_HOLD_FAILSAFE_MINUTES] * 60000))
+    cg.add(var.set_pack_stale_timeout_ms(config[CONF_PACK_STALE_TIMEOUT_SECONDS] * 1000))

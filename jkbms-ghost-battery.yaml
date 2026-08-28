@@ -66,6 +66,11 @@ jkbms_ghost_battery:
   hold_failsafe_minutes: 240  # safety backstop: release to 100% after this long even without
                                # confirmed balance, so a wiring/address mistake can't cause
                                # indefinite overcharge. Set to 0 to disable.
+  pack_stale_timeout_seconds: 30  # if a pack hasn't sent a fresh status frame in this long, its
+                                   # cached reading is no longer trusted: release is refused, and
+                                   # an already-released hold re-arms as a precaution (wiring
+                                   # fault, BMS reset, pack disconnected). Real packs are normally
+                                   # polled every few seconds, so keep this well above that.
 
 sensor:
   - platform: jkbms_ghost_battery
