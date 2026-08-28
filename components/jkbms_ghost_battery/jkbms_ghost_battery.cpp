@@ -46,8 +46,23 @@ void JkBmsGhostBattery::setup() {
     this->de_pin_->digital_write(false);
   }
   this->hold_start_time_ = millis();
-  // starts holding (see holding_ default above) until a pack is seen and confirmed full/balanced
-  this->publish_hold_status_("holding - waiting for pack data");
+
+  // restore the hold/release state saved by evaluate_hold_() across reboots (OTA, brownout,
+  // crash) so a routine restart doesn't force a whole new hold_failsafe_minutes wait even though
+  // the pack(s) were already confirmed full/balanced moments earlier. Falls back to the safe
+  // default (holding_ stays true, set above in its declaration) if this is the first ever boot.
+  this->hold_state_pref_ = global_preferences->make_preference<bool>(fnv1_hash("jkbms_ghost_battery_holding"));
+  bool restored_holding;
+  if (this->hold_state_pref_.load(&restored_holding)) {
+    this->holding_ = restored_holding;
+    ESP_LOGI(TAG, "Restored hold state from flash: %s", restored_holding ? "holding" : "released");
+  }
+
+  if (this->holding_) {
+    this->publish_hold_status_("holding - waiting for pack data");
+  } else {
+    this->publish_hold_status_("released (restored from flash)");
+  }
 }
 
 void JkBmsGhostBattery::dump_config() {
@@ -58,6 +73,11 @@ void JkBmsGhostBattery::dump_config() {
   if (this->pack_count_ >= 2) ESP_LOGCONFIG(TAG, "  Pack 2 address: %u", this->pack2_address_);
   ESP_LOGCONFIG(TAG, "  Cell full voltage: >= %u mV", this->cell_full_low_mv_);
   ESP_LOGCONFIG(TAG, "  Cell balance tolerance: %u mV", this->cell_balance_tolerance_mv_);
+  if (this->cell_full_max_temp_c_ > 0) {
+    ESP_LOGCONFIG(TAG, "  Cell full max temperature: <= %d C", this->cell_full_max_temp_c_);
+  } else {
+    ESP_LOGCONFIG(TAG, "  Cell full max temperature check: disabled");
+  }
   ESP_LOGCONFIG(TAG, "  Reset SoC: %u%%", this->reset_soc_percent_);
   ESP_LOGCONFIG(TAG, "  Hold failsafe: %u min", (unsigned) (this->hold_failsafe_ms_ / 60000));
   ESP_LOGCONFIG(TAG, "  Pack data stale timeout: %u s", (unsigned) (this->pack_stale_timeout_ms_ / 1000));
@@ -86,6 +106,10 @@ void JkBmsGhostBattery::dump_config() {
   LOG_SENSOR("  ", "Average voltage", this->average_voltage_sensor_);
   LOG_SENSOR("  ", "Pack 1 RCV (rated charge voltage)", this->pack1_rcv_voltage_sensor_);
   LOG_SENSOR("  ", "Pack 2 RCV (rated charge voltage)", this->pack2_rcv_voltage_sensor_);
+  LOG_SENSOR("  ", "Bus CRC error count", this->bus_error_count_sensor_);
+  LOG_SENSOR("  ", "Hold failsafe remaining", this->hold_failsafe_remaining_sensor_);
+  LOG_SENSOR("  ", "Total charge energy", this->total_charge_energy_sensor_);
+  LOG_SENSOR("  ", "Total discharge energy", this->total_discharge_energy_sensor_);
   LOG_TEXT_SENSOR("  ", "Hold status", this->hold_status_text_sensor_);
   LOG_BINARY_SENSOR("  ", "Pack 1 data stale", this->pack1_data_stale_sensor_);
   LOG_BINARY_SENSOR("  ", "Pack 2 data stale", this->pack2_data_stale_sensor_);
@@ -144,7 +168,17 @@ bool JkBmsGhostBattery::is_query_for_us_() {
 
   uint16_t expected = this->crc16_(this->num_bytes_ - 2);
   uint16_t actual = ((uint16_t) this->buf_[this->num_bytes_ - 1] << 8) | this->buf_[this->num_bytes_ - 2];
-  return expected == actual;
+  if (expected != actual) {
+    // this frame was otherwise shaped exactly like a query addressed to us (right header bytes,
+    // right address) but failed its CRC - almost always RS485 wiring/termination/noise, not a
+    // coincidental non-JK frame, so it's worth counting for troubleshooting
+    this->bus_error_count_++;
+    if (this->bus_error_count_sensor_ != nullptr) this->bus_error_count_sensor_->publish_state(this->bus_error_count_);
+    ESP_LOGW(TAG, "CRC mismatch on a query addressed to us (expected 0x%04X, got 0x%04X) - check RS485 wiring/termination",
+             expected, actual);
+    return false;
+  }
+  return true;
 }
 
 void JkBmsGhostBattery::send_frame1_() {
@@ -334,7 +368,28 @@ void JkBmsGhostBattery::sniff_real_pack_() {
     float pack1_power_kw = (this->pack1_voltage_mv_ / 1000.0f) * (this->pack1_current_ma_ / 1000.0f) / 1000.0f;
     float pack2_power_kw = this->pack_count_ >= 2 ? (this->pack2_voltage_mv_ / 1000.0f) * (this->pack2_current_ma_ / 1000.0f) / 1000.0f : 0.0f;
     if (this->total_current_sensor_ != nullptr) this->total_current_sensor_->publish_state(total_current_a);
-    if (this->total_power_sensor_ != nullptr) this->total_power_sensor_->publish_state(pack1_power_kw + pack2_power_kw);
+    float total_power_kw = pack1_power_kw + pack2_power_kw;
+    if (this->total_power_sensor_ != nullptr) this->total_power_sensor_->publish_state(total_power_kw);
+
+    // Home Assistant Energy dashboard integration: running kWh totals, split into energy
+    // into/out of the battery (positive total_power = charging, per the JK protocol's own sign
+    // convention - see set_pack1_current_sensor's comment). Each call integrates power x elapsed
+    // time since the previous call; energy_last_update_ms_ starts at 0 so the very first call
+    // only records a timestamp instead of a bogus multi-second-since-boot energy spike.
+    uint32_t energy_now = millis();
+    if (this->energy_last_update_ms_ != 0) {
+      float hours_elapsed = (energy_now - this->energy_last_update_ms_) / 3600000.0f;
+      if (total_power_kw > 0) {
+        this->total_charge_energy_kwh_ += total_power_kw * hours_elapsed;
+      } else if (total_power_kw < 0) {
+        this->total_discharge_energy_kwh_ += -total_power_kw * hours_elapsed;
+      }
+      if (this->total_charge_energy_sensor_ != nullptr)
+        this->total_charge_energy_sensor_->publish_state(this->total_charge_energy_kwh_);
+      if (this->total_discharge_energy_sensor_ != nullptr)
+        this->total_discharge_energy_sensor_->publish_state(this->total_discharge_energy_kwh_);
+    }
+    this->energy_last_update_ms_ = energy_now;
 
     // highest cell minus lowest cell across ALL cells on ALL configured packs (not per-pack)
     uint16_t total_min_mv = this->pack1_min_mv_;
@@ -377,20 +432,42 @@ void JkBmsGhostBattery::evaluate_hold_() {
     this->pack2_stale_published_ = pack2_stale;
   }
 
+  // seconds left before hold_failsafe_ms_ forces a release without confirmed balance - lets a
+  // dashboard/automation react before it actually fires instead of only finding out afterwards.
+  // 0 while released, or while the failsafe is disabled (hold_failsafe_ms_ == 0).
+  uint32_t failsafe_remaining_s = 0;
+  if (this->holding_ && this->hold_failsafe_ms_ > 0) {
+    uint32_t elapsed_ms = now - this->hold_start_time_;
+    failsafe_remaining_s = elapsed_ms >= this->hold_failsafe_ms_ ? 0 : (this->hold_failsafe_ms_ - elapsed_ms) / 1000;
+  }
+  if (this->hold_failsafe_remaining_sensor_ != nullptr &&
+      failsafe_remaining_s != this->hold_failsafe_remaining_published_s_) {
+    this->hold_failsafe_remaining_sensor_->publish_state(failsafe_remaining_s);
+    this->hold_failsafe_remaining_published_s_ = failsafe_remaining_s;
+  }
+
   if (this->holding_) {
-    bool pack1_ok = pack1_fresh && this->pack1_min_mv_ >= this->cell_full_low_mv_ &&
+    // cell_full_max_temp_c_ == 0 means the check is disabled; otherwise a pack that's too hot
+    // blocks release even if it's otherwise full and balanced - see set_cell_full_max_temp_c()
+    bool pack1_temp_ok = this->cell_full_max_temp_c_ == 0 ||
+                          this->pack1_temperature_c10_ <= this->cell_full_max_temp_c_ * 10;
+    bool pack2_temp_ok = this->cell_full_max_temp_c_ == 0 ||
+                          this->pack2_temperature_c10_ <= this->cell_full_max_temp_c_ * 10;
+    bool pack1_ok = pack1_fresh && pack1_temp_ok && this->pack1_min_mv_ >= this->cell_full_low_mv_ &&
                      (this->pack1_max_mv_ - this->pack1_min_mv_) <= this->cell_balance_tolerance_mv_;
     bool pack2_ok = this->pack_count_ < 2 ||
-                    (pack2_fresh && this->pack2_min_mv_ >= this->cell_full_low_mv_ &&
+                    (pack2_fresh && pack2_temp_ok && this->pack2_min_mv_ >= this->cell_full_low_mv_ &&
                      (this->pack2_max_mv_ - this->pack2_min_mv_) <= this->cell_balance_tolerance_mv_);
 
     if (pack1_ok && pack2_ok) {
       this->holding_ = false;
+      this->hold_state_pref_.save(&this->holding_);
       ESP_LOGI(TAG, "Pack(s) balanced (<=%u mV spread) and full (>=%u mV) - releasing ghost SoC to 100%%",
                this->cell_balance_tolerance_mv_, this->cell_full_low_mv_);
       this->publish_hold_status_("released - balanced and full");
     } else if (this->hold_failsafe_ms_ > 0 && (now - this->hold_start_time_) >= this->hold_failsafe_ms_) {
       this->holding_ = false;
+      this->hold_state_pref_.save(&this->holding_);
       ESP_LOGW(TAG, "SoC hold failsafe reached - releasing to 100%% without confirmed balance");
       this->publish_hold_status_("released - failsafe (balance not confirmed)");
     }
@@ -400,6 +477,7 @@ void JkBmsGhostBattery::evaluate_hold_() {
     if ((this->pack1_seen_ && this->pack1_soc_ <= this->reset_soc_percent_) || pack2_low || went_stale) {
       this->holding_ = true;
       this->hold_start_time_ = now;
+      this->hold_state_pref_.save(&this->holding_);
       if (went_stale) {
         // defensive re-arm: we can no longer confirm the pack(s) are actually still full/balanced,
         // so don't keep telling the bus 100% on the strength of a reading that's no longer trusted

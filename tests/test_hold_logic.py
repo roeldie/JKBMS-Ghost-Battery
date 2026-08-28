@@ -13,6 +13,8 @@ class HoldStateMachine:
     pack_count: int = 2
     cell_full_low_mv: int = 3460
     cell_balance_tolerance_mv: int = 20
+    # 0 disables the check - matches the component's own default (50 C)
+    cell_full_max_temp_c: int = 50
     reset_soc_percent: int = 99
     hold_failsafe_ms: int = 240 * 60000
     pack_stale_timeout_ms: int = 30000
@@ -30,21 +32,27 @@ class HoldStateMachine:
     pack2_max_mv: int = 0
     pack1_soc: int = 0
     pack2_soc: int = 0
+    pack1_temperature_c10: int = 0
+    pack2_temperature_c10: int = 0
 
-    def see_pack1(self, now, min_mv, max_mv, soc):
+    # temp_c10 defaults to a comfortably cool 25.0 C so existing callers that don't care about
+    # temperature keep passing without changes
+    def see_pack1(self, now, min_mv, max_mv, soc, temp_c10=250):
         self.pack1_seen = True
         self.pack1_last_update_ms = now
         self.pack1_min_mv = min_mv
         self.pack1_max_mv = max_mv
         self.pack1_soc = soc
+        self.pack1_temperature_c10 = temp_c10
         self.evaluate(now)
 
-    def see_pack2(self, now, min_mv, max_mv, soc):
+    def see_pack2(self, now, min_mv, max_mv, soc, temp_c10=250):
         self.pack2_seen = True
         self.pack2_last_update_ms = now
         self.pack2_min_mv = min_mv
         self.pack2_max_mv = max_mv
         self.pack2_soc = soc
+        self.pack2_temperature_c10 = temp_c10
         self.evaluate(now)
 
     def evaluate(self, now):
@@ -54,13 +62,21 @@ class HoldStateMachine:
         )
 
         if self.holding:
+            pack1_temp_ok = (
+                self.cell_full_max_temp_c == 0 or self.pack1_temperature_c10 <= self.cell_full_max_temp_c * 10
+            )
+            pack2_temp_ok = (
+                self.cell_full_max_temp_c == 0 or self.pack2_temperature_c10 <= self.cell_full_max_temp_c * 10
+            )
             pack1_ok = (
                 pack1_fresh
+                and pack1_temp_ok
                 and self.pack1_min_mv >= self.cell_full_low_mv
                 and (self.pack1_max_mv - self.pack1_min_mv) <= self.cell_balance_tolerance_mv
             )
             pack2_ok = self.pack_count < 2 or (
                 pack2_fresh
+                and pack2_temp_ok
                 and self.pack2_min_mv >= self.cell_full_low_mv
                 and (self.pack2_max_mv - self.pack2_min_mv) <= self.cell_balance_tolerance_mv
             )
@@ -157,3 +173,25 @@ def test_release_refuses_stale_pack_even_if_last_reading_was_full():
     sm.pack1_soc = 100
     sm.evaluate(now=30001)
     assert sm.holding is True
+
+
+def test_hot_pack_blocks_release():
+    sm = HoldStateMachine(pack_count=1, cell_full_max_temp_c=50)
+    # full and balanced, but 55.0 C is over the 50 C limit
+    sm.see_pack1(now=1000, min_mv=FULL_MIN_MV, max_mv=FULL_MAX_MV, soc=100, temp_c10=550)
+    assert sm.holding is True
+
+
+def test_pack_cools_down_then_releases():
+    sm = HoldStateMachine(pack_count=1, cell_full_max_temp_c=50)
+    sm.see_pack1(now=1000, min_mv=FULL_MIN_MV, max_mv=FULL_MAX_MV, soc=100, temp_c10=550)
+    assert sm.holding is True, "still too hot"
+    sm.see_pack1(now=2000, min_mv=FULL_MIN_MV, max_mv=FULL_MAX_MV, soc=100, temp_c10=450)
+    assert sm.holding is False, "45.0 C is at/under the 50 C limit"
+
+
+def test_temp_check_disabled_when_zero():
+    sm = HoldStateMachine(pack_count=1, cell_full_max_temp_c=0)
+    # would block release above with the check enabled (see test_hot_pack_blocks_release)
+    sm.see_pack1(now=1000, min_mv=FULL_MIN_MV, max_mv=FULL_MAX_MV, soc=100, temp_c10=550)
+    assert sm.holding is False

@@ -40,8 +40,9 @@ since the logic is identical either way, minus pack 2 in single-pack mode:
    tracks each pack's min/max cell voltage and reported SoC.
 3. Once **every cell on every configured pack** is at or above `cell_full_low_mv` (default 3.46V)
    **and** each pack's own highest-lowest cell spread is within `cell_balance_tolerance_mv`
-   (default 20mV), the ghost releases: it reports 100% SoC and full capacity, so the inverter
-   gets a genuine full-charge signal and stops charging.
+   (default 20mV) **and** neither pack is hotter than `cell_full_max_temp_c` (default 50°C), the
+   ghost releases: it reports 100% SoC and full capacity, so the inverter gets a genuine
+   full-charge signal and stops charging.
 4. As soon as any configured pack's own reported SoC drops to `reset_soc_percent` (default 99%) —
    ie. discharging has started — the ghost re-arms back to holding, ready for the next cycle.
 5. `hold_failsafe_minutes` (default 240) is a safety backstop: if balance/full can never be
@@ -53,6 +54,11 @@ since the logic is identical either way, minus pack 2 in single-pack mode:
    release on the strength of it, and if it had already released, it re-arms back to holding as a
    precaution. Real packs are normally polled every few seconds, so this should stay well above
    that under normal conditions.
+7. The hold/release state (step 1 vs step 3) is saved to flash every time it changes, and
+   restored on boot. A routine restart (OTA update, brownout, crash) doesn't force a fresh
+   `hold_failsafe_minutes` wait if the pack(s) were already confirmed full and balanced moments
+   earlier — the ghost comes back up already released instead of re-holding from scratch. A
+   first-ever boot with nothing saved yet still starts holding, same as always.
 
 ## ⚠️ Safety notes
 
@@ -200,6 +206,7 @@ jkbms_ghost_battery:
   cell_full_low_mv: 3460        # every cell, both packs, must be at/above this voltage (mV)...
   cell_balance_tolerance_mv: 20 # ...AND each pack's own max-min cell spread must be within this
                                  # many mV - together, "full" and "balanced"
+  cell_full_max_temp_c: 50      # ...AND neither pack may be hotter than this (C). 0 disables it
   reset_soc_percent: 99   # re-arms the hold once pack1 or pack2's real SoC drops to this value
   hold_failsafe_minutes: 240  # safety backstop; releases anyway if balance is never confirmed. 0 disables it
   pack_stale_timeout_seconds: 30  # a pack with no fresh data for this long is treated as unusable -
@@ -256,6 +263,14 @@ sensor:
                              # only (updates only if something else on the bus queries it)
     pack2_rcv_voltage:
       name: "Pack 2 RCV"
+    bus_error_count:
+      name: "Bus CRC error count"   # rising count = RS485 wiring/termination/noise problem
+    hold_failsafe_remaining:
+      name: "Hold failsafe remaining"   # seconds until hold_failsafe_minutes forces a release
+    total_charge_energy:
+      name: "Total charge energy"     # for the Home Assistant Energy dashboard - resets on reboot
+    total_discharge_energy:
+      name: "Total discharge energy"
     # individual cell voltages - pack1_cell_1 .. pack1_cell_16, pack2_cell_1 .. pack2_cell_16
     # (32 total, all optional). See jkbms-ghost-battery.yaml for the full list.
     # These are entity_category: diagnostic, so Home Assistant groups them into the device's
@@ -295,7 +310,7 @@ omit any you don't want.
 
 ## Home Assistant entities
 
-**`sensor:`** — 56 sensors, read passively off real traffic already on the bus (the ghost never
+**`sensor:`** — 60 sensors, read passively off real traffic already on the bus (the ghost never
 queries anything itself for these):
 - Per pack (1 and 2): min/max cell voltage, cell voltage diff (max - min, ie. how far out of
   balance that pack currently is), total voltage, current (positive = charging, negative =
@@ -319,12 +334,26 @@ queries anything itself for these):
   these only update if something else on your bus (eg. the JK app, Solar Assistant) happens to
   query that pack's settings. They may simply never update on your setup - that's expected, not
   a bug.
+- **`bus_error_count`** — counts CRC failures on frames that were otherwise structured like a
+  query addressed to the ghost. A count that's rising (rather than staying at 0) points at an
+  RS485 wiring, termination or noise problem worth investigating. `entity_category: diagnostic`.
+- **`hold_failsafe_remaining`** — seconds left before `hold_failsafe_minutes` forces a release
+  without confirmed balance. Reads 0 while released, or while the failsafe is disabled
+  (`hold_failsafe_minutes: 0`). Lets you build an automation that warns you before the failsafe
+  actually fires instead of only finding out afterwards. `entity_category: diagnostic`.
+- **`total_charge_energy`** / **`total_discharge_energy`** — running kWh totals (energy into /
+  out of the battery), integrated from `total_power` over time, ready to feed straight into Home
+  Assistant's Energy dashboard as battery storage sensors. Like any in-memory counter on this
+  device, both reset to 0 on every reboot — HA's `total_increasing` state class treats that as a
+  normal meter reset, the same way a real energy meter behaves after a power cut.
 
 **`text_sensor:`**
 - **`hold_status`** — the "why" behind `ghost_fake_soc`'s raw "what". Reports a short reason
   string each time the hold/release decision changes, eg. `"released - balanced and full"`,
   `"released - failsafe (balance not confirmed)"`, `"holding - re-armed (SoC dropped)"`, or
-  `"holding - re-armed (data stale)"`. Starts as `"holding - waiting for pack data"` on boot.
+  `"holding - re-armed (data stale)"`. Starts as `"holding - waiting for pack data"` on a
+  first-ever boot, or `"released (restored from flash)"` if the saved state from before a reboot
+  was already released.
 
 **`binary_sensor:`**
 - **`pack1_data_stale`** / **`pack2_data_stale`** — on when that pack hasn't sent a fresh status

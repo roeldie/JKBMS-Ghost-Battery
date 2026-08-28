@@ -2,6 +2,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/preferences.h"
 #include "esphome/components/uart/uart.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
@@ -32,6 +33,9 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   void set_pack2_address(uint8_t address) { this->pack2_address_ = address; }
   void set_cell_full_low_mv(uint16_t mv) { this->cell_full_low_mv_ = mv; }
   void set_cell_balance_tolerance_mv(uint16_t mv) { this->cell_balance_tolerance_mv_ = mv; }
+  // release is refused if either pack is hotter than this, even if voltage/balance are otherwise
+  // fine - 0 disables the check entirely
+  void set_cell_full_max_temp_c(int16_t c) { this->cell_full_max_temp_c_ = c; }
   void set_reset_soc_percent(uint8_t percent) { this->reset_soc_percent_ = percent; }
   void set_hold_failsafe_ms(uint32_t ms) { this->hold_failsafe_ms_ = ms; }
   // if a configured pack hasn't produced a fresh status frame in this long, its cached
@@ -70,6 +74,17 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   // settings frame - see RCV_OFFSET in jkbms_ghost_battery.cpp
   void set_pack1_rcv_voltage_sensor(sensor::Sensor *s) { this->pack1_rcv_voltage_sensor_ = s; }
   void set_pack2_rcv_voltage_sensor(sensor::Sensor *s) { this->pack2_rcv_voltage_sensor_ = s; }
+  // counts CRC failures on frames that were otherwise structured like a query addressed to us -
+  // a rising count points at RS485 wiring/termination/noise problems
+  void set_bus_error_count_sensor(sensor::Sensor *s) { this->bus_error_count_sensor_ = s; }
+  // seconds left before hold_failsafe_ms_ forces a release without confirmed balance - 0 while
+  // released, or while the failsafe is disabled
+  void set_hold_failsafe_remaining_sensor(sensor::Sensor *s) { this->hold_failsafe_remaining_sensor_ = s; }
+  // running kWh totals for the Home Assistant Energy dashboard, split into energy into/out of the
+  // battery. Integrated from total_power, so they reset to 0 on every reboot like any other
+  // in-memory counter - HA's total_increasing state class treats that as a normal meter reset.
+  void set_total_charge_energy_sensor(sensor::Sensor *s) { this->total_charge_energy_sensor_ = s; }
+  void set_total_discharge_energy_sensor(sensor::Sensor *s) { this->total_discharge_energy_sensor_ = s; }
 
   // human-readable reason for the ghost's current hold/release decision (see evaluate_hold_()) -
   // this is the "why", complementing ghost_fake_soc's raw "what" (0 or 100)
@@ -109,6 +124,9 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   uint8_t pack2_address_{1};
   uint16_t cell_full_low_mv_{3460};
   uint16_t cell_balance_tolerance_mv_{20};
+  // 0 disables the check; matches the YAML schema's own default (50 C) for the same reason
+  // hold_failsafe_ms_ has a hardcoded default above
+  int16_t cell_full_max_temp_c_{50};
   uint8_t reset_soc_percent_{99};
   // matches the YAML schema's own default (240 min) so a build that somehow skips codegen's
   // set_hold_failsafe_ms() call still gets the safe default instead of the failsafe silently
@@ -119,12 +137,29 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   uint8_t buf_[JK_FRAME_SIZE];
   uint16_t num_bytes_{0};
   uint32_t last_byte_time_{0};
+  // count of CRC failures on frames that were otherwise structured like a query addressed to us
+  // (right header bytes, right address) - see is_query_for_us_()
+  uint32_t bus_error_count_{0};
+
+  // running kWh totals for the energy dashboard sensors, integrated from total_power each time a
+  // new status frame updates it (see sniff_real_pack_()). Reset to 0 on every reboot.
+  float total_charge_energy_kwh_{0};
+  float total_discharge_energy_kwh_{0};
+  uint32_t energy_last_update_ms_{0};
 
   // true while the ghost is actively blocking (reporting 0% SoC / 0 Ah remaining).
   // Starts true: until we've actually confirmed both real packs are full and balanced, don't
   // let the array ever read 100%.
   bool holding_{true};
   uint32_t hold_start_time_{0};
+  // remembers holding_ in flash across reboots (OTA, brownout, crash) so a routine restart
+  // doesn't force a full failsafe wait even though the pack(s) were already confirmed
+  // full/balanced moments earlier. See setup() and evaluate_hold_().
+  ESPPreferenceObject hold_state_pref_;
+  // last value actually sent to hold_failsafe_remaining_sensor_ - starts at an otherwise
+  // impossible value so the real first reading (often 0) still gets published instead of being
+  // swallowed by the "only publish on change" check
+  uint32_t hold_failsafe_remaining_published_s_{0xFFFFFFFF};
 
   bool pack1_seen_{false}, pack2_seen_{false};
   // millis() timestamp of the last frame2 status packet seen from each pack - used to detect a
@@ -168,6 +203,10 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   sensor::Sensor *average_voltage_sensor_{nullptr};
   sensor::Sensor *pack1_rcv_voltage_sensor_{nullptr};
   sensor::Sensor *pack2_rcv_voltage_sensor_{nullptr};
+  sensor::Sensor *bus_error_count_sensor_{nullptr};
+  sensor::Sensor *hold_failsafe_remaining_sensor_{nullptr};
+  sensor::Sensor *total_charge_energy_sensor_{nullptr};
+  sensor::Sensor *total_discharge_energy_sensor_{nullptr};
   sensor::Sensor *pack1_cell_sensors_[16]{};
   sensor::Sensor *pack2_cell_sensors_[16]{};
 

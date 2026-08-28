@@ -21,6 +21,7 @@ CONF_PACK1_ADDRESS = "pack1_address"
 CONF_PACK2_ADDRESS = "pack2_address"
 CONF_CELL_FULL_LOW_MV = "cell_full_low_mv"
 CONF_CELL_BALANCE_TOLERANCE_MV = "cell_balance_tolerance_mv"
+CONF_CELL_FULL_MAX_TEMP_C = "cell_full_max_temp_c"
 CONF_RESET_SOC_PERCENT = "reset_soc_percent"
 CONF_HOLD_FAILSAFE_MINUTES = "hold_failsafe_minutes"
 CONF_PACK_STALE_TIMEOUT_SECONDS = "pack_stale_timeout_seconds"
@@ -65,6 +66,9 @@ CONFIG_SCHEMA = cv.All(
             # ...AND each pack's own highest-lowest cell spread must be within this many mV -
             # together these two conditions mean "full and balanced"
             cv.Optional(CONF_CELL_BALANCE_TOLERANCE_MV, default=20): cv.int_range(min=1, max=200),
+            # release is refused if either pack is hotter than this, even if voltage/balance are
+            # otherwise fine. Set to 0 to disable this check.
+            cv.Optional(CONF_CELL_FULL_MAX_TEMP_C, default=50): cv.int_range(min=0, max=100),
             # once released to 100%, the ghost drops back to 0% as soon as pack1 or pack2's own
             # reported SoC falls to (or below) this percentage
             cv.Optional(CONF_RESET_SOC_PERCENT, default=99): cv.int_range(min=0, max=100),
@@ -101,6 +105,7 @@ async def to_code(config):
     cg.add(var.set_pack2_address(config[CONF_PACK2_ADDRESS]))
     cg.add(var.set_cell_full_low_mv(config[CONF_CELL_FULL_LOW_MV]))
     cg.add(var.set_cell_balance_tolerance_mv(config[CONF_CELL_BALANCE_TOLERANCE_MV]))
+    cg.add(var.set_cell_full_max_temp_c(config[CONF_CELL_FULL_MAX_TEMP_C]))
     cg.add(var.set_reset_soc_percent(config[CONF_RESET_SOC_PERCENT]))
     cg.add(var.set_hold_failsafe_ms(config[CONF_HOLD_FAILSAFE_MINUTES] * 60000))
     cg.add(var.set_pack_stale_timeout_ms(config[CONF_PACK_STALE_TIMEOUT_SECONDS] * 1000))

@@ -64,6 +64,8 @@ jkbms_ghost_battery:
   cell_full_low_mv: 3460       # every cell on both packs must be >= this voltage (mV)...
   cell_balance_tolerance_mv: 20 # ...AND each pack's own max-min cell spread must be within this
                                  # many mV - together, "full" and "balanced"
+  cell_full_max_temp_c: 50    # ...AND neither pack may be hotter than this (C) - release is
+                               # refused even if voltage/balance are fine. Set to 0 to disable.
   reset_soc_percent: 99   # once released, ghost drops back to 0% as soon as pack1 or pack2's own
                            # reported SoC falls to this percentage (ie. discharging has started)
   hold_failsafe_minutes: 240  # safety backstop: release to 100% after this long even without
@@ -126,6 +128,14 @@ sensor:
                              # only (updates only if something else on the bus queries it)
     pack2_rcv_voltage:
       name: "Pack 2 RCV"
+    bus_error_count:
+      name: "Bus CRC error count"   # rising count = RS485 wiring/termination/noise problem
+    hold_failsafe_remaining:
+      name: "Hold failsafe remaining"   # seconds until hold_failsafe_minutes forces a release
+    total_charge_energy:
+      name: "Total charge energy"     # for the Home Assistant Energy dashboard - resets on reboot
+    total_discharge_energy:
+      name: "Total discharge energy"
     # individual cell voltages - all 32 optional, add/remove any you don't want
     pack1_cell_1:
       name: "Pack 1 Cell 1"
