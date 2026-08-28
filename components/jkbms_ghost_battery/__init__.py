@@ -16,6 +16,7 @@ CONF_JKBMS_GHOST_BATTERY_ID = "jkbms_ghost_battery_id"
 
 CONF_DE_PIN = "de_pin"
 CONF_GHOST_ADDRESS = "ghost_address"
+CONF_PACK_COUNT = "pack_count"
 CONF_PACK1_ADDRESS = "pack1_address"
 CONF_PACK2_ADDRESS = "pack2_address"
 CONF_CELL_FULL_LOW_MV = "cell_full_low_mv"
@@ -29,6 +30,9 @@ CONFIG_SCHEMA = (
             cv.GenerateID(): cv.declare_id(JkBmsGhostBattery),
             cv.Optional(CONF_DE_PIN): pins.gpio_output_pin_schema,
             cv.Optional(CONF_GHOST_ADDRESS, default=15): cv.int_range(min=1, max=247),
+            # 1 or 2 real packs. In single-pack mode, pack2_address below is ignored entirely -
+            # the release/re-arm logic and the average sensors all work off pack1 alone.
+            cv.Optional(CONF_PACK_COUNT, default=2): cv.one_of(1, 2, int=True),
             cv.Optional(CONF_PACK1_ADDRESS, default=0): cv.int_range(min=0, max=247),
             cv.Optional(CONF_PACK2_ADDRESS, default=1): cv.int_range(min=0, max=247),
             # every cell on both packs must be at/above this voltage (mV)...
@@ -60,6 +64,7 @@ async def to_code(config):
         cg.add(var.set_de_pin(de_pin))
 
     cg.add(var.set_ghost_address(config[CONF_GHOST_ADDRESS]))
+    cg.add(var.set_pack_count(config[CONF_PACK_COUNT]))
     cg.add(var.set_pack1_address(config[CONF_PACK1_ADDRESS]))
     cg.add(var.set_pack2_address(config[CONF_PACK2_ADDRESS]))
     cg.add(var.set_cell_full_low_mv(config[CONF_CELL_FULL_LOW_MV]))

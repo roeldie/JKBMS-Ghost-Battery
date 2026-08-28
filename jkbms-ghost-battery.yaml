@@ -11,6 +11,14 @@ esp32:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  # if the device can't connect (eg. WiFi password changed), it falls back to broadcasting this
+  # hotspot - connect to it with a phone and a captive portal page lets you enter new credentials,
+  # no reflashing needed
+  ap:
+    ssid: "JKBMS Ghost Battery Fallback"
+    password: !secret ap_fallback_password
+
+captive_portal:
 
 logger:
   level: INFO  # was DEBUG - pack1/pack2 detection and thresholds confirmed working
@@ -46,6 +54,8 @@ jkbms_ghost_battery:
   # and wire it to the tied-together DE+RE pins:
   # de_pin: GPIO4
   ghost_address: 15      # RS485 address to spoof - must have no physical battery here
+  pack_count: 2          # 1 or 2 - set to 1 if you only have a single real pack (pack2_address
+                          # below is then ignored entirely, no need to remove it)
   pack1_address: 0       # real pack 1 / master BMS RS485 address - verify your dip switch setting
   pack2_address: 1       # real pack 2 RS485 address - verify your dip switch setting
   cell_full_low_mv: 3460       # every cell on both packs must be >= this voltage (mV)...
@@ -67,21 +77,124 @@ sensor:
       name: "Pack 2 min cell voltage"
     pack2_max_cell_voltage:
       name: "Pack 2 max cell voltage"
+    pack1_cell_voltage_diff:
+      name: "Pack 1 cell voltage diff"   # highest cell minus lowest cell in pack 1
+    pack2_cell_voltage_diff:
+      name: "Pack 2 cell voltage diff"   # highest cell minus lowest cell in pack 2
+    pack1_voltage:
+      name: "Pack 1 voltage"
+    pack2_voltage:
+      name: "Pack 2 voltage"
+    pack1_current:
+      name: "Pack 1 current"   # positive = charging, negative = discharging
+    pack2_current:
+      name: "Pack 2 current"
+    pack1_power:
+      name: "Pack 1 power"
+    pack2_power:
+      name: "Pack 2 power"
+    total_power:
+      name: "Total power"   # pack1 + pack2 power, straight sum
+    total_current:
+      name: "Total current"   # pack1 + pack2 current, straight sum
+    total_cell_voltage_diff:
+      name: "Total cell voltage diff"   # highest cell minus lowest cell across ALL cells, both packs
+    pack1_temperature:
+      name: "Pack 1 temperature"
+    pack2_temperature:
+      name: "Pack 2 temperature"
     pack1_soc:
       name: "Pack 1 SoC"
     pack2_soc:
       name: "Pack 2 SoC"
+    average_soc:
+      name: "Average SoC"   # (pack1 + pack2) / 2
+    average_voltage:
+      name: "Average voltage"   # (pack1 + pack2) / 2
     ghost_fake_soc:
       name: "Ghost fake SoC"   # what the ghost is currently telling the bus: 0 or 100
+    pack1_rcv_voltage:
+      name: "Pack 1 RCV"   # rated charge voltage from pack 1's settings - read-only, passive
+                             # only (updates only if something else on the bus queries it)
+    pack2_rcv_voltage:
+      name: "Pack 2 RCV"
+    # individual cell voltages - all 32 optional, add/remove any you don't want
+    pack1_cell_1:
+      name: "Pack 1 Cell 1"
+    pack1_cell_2:
+      name: "Pack 1 Cell 2"
+    pack1_cell_3:
+      name: "Pack 1 Cell 3"
+    pack1_cell_4:
+      name: "Pack 1 Cell 4"
+    pack1_cell_5:
+      name: "Pack 1 Cell 5"
+    pack1_cell_6:
+      name: "Pack 1 Cell 6"
+    pack1_cell_7:
+      name: "Pack 1 Cell 7"
+    pack1_cell_8:
+      name: "Pack 1 Cell 8"
+    pack1_cell_9:
+      name: "Pack 1 Cell 9"
+    pack1_cell_10:
+      name: "Pack 1 Cell 10"
+    pack1_cell_11:
+      name: "Pack 1 Cell 11"
+    pack1_cell_12:
+      name: "Pack 1 Cell 12"
+    pack1_cell_13:
+      name: "Pack 1 Cell 13"
+    pack1_cell_14:
+      name: "Pack 1 Cell 14"
+    pack1_cell_15:
+      name: "Pack 1 Cell 15"
+    pack1_cell_16:
+      name: "Pack 1 Cell 16"
+    pack2_cell_1:
+      name: "Pack 2 Cell 1"
+    pack2_cell_2:
+      name: "Pack 2 Cell 2"
+    pack2_cell_3:
+      name: "Pack 2 Cell 3"
+    pack2_cell_4:
+      name: "Pack 2 Cell 4"
+    pack2_cell_5:
+      name: "Pack 2 Cell 5"
+    pack2_cell_6:
+      name: "Pack 2 Cell 6"
+    pack2_cell_7:
+      name: "Pack 2 Cell 7"
+    pack2_cell_8:
+      name: "Pack 2 Cell 8"
+    pack2_cell_9:
+      name: "Pack 2 Cell 9"
+    pack2_cell_10:
+      name: "Pack 2 Cell 10"
+    pack2_cell_11:
+      name: "Pack 2 Cell 11"
+    pack2_cell_12:
+      name: "Pack 2 Cell 12"
+    pack2_cell_13:
+      name: "Pack 2 Cell 13"
+    pack2_cell_14:
+      name: "Pack 2 Cell 14"
+    pack2_cell_15:
+      name: "Pack 2 Cell 15"
+    pack2_cell_16:
+      name: "Pack 2 Cell 16"
 
 switch:
   - platform: jkbms_ghost_battery
-    # arm this first (in Home Assistant) - while off, "Manual force full" below has no effect
-    # and the automatic cell-balance logic keeps running normally. Always starts off on boot.
+    # arm this first (in Home Assistant) - while off, the "Ghost force SOC" slider below has no
+    # effect and the automatic cell-balance logic keeps running normally. Always starts off on boot.
     manual_override_armed:
-      name: "Ghost manual override armed"
+      name: "Ghost forced SOC enabled"
       restore_mode: ALWAYS_OFF
-    # only takes effect once "armed" above is on: on = force ghost to 100%, off = force to 0%
-    manual_force_full:
-      name: "Ghost force 100%"
-      restore_mode: ALWAYS_OFF
+
+number:
+  - platform: jkbms_ghost_battery
+    # only takes effect once "Ghost forced SOC enabled" above is on: 100 = force ghost to 100%,
+    # 0 = force to 0%. Step is fixed at 100, so the slider only has these two positions.
+    manual_force_soc:
+      name: "Ghost force SOC"

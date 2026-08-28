@@ -29,17 +29,20 @@ against [txubelaxu/esphome-jk-bms](https://github.com/txubelaxu/esphome-jk-bms).
 
 ## How the release logic works
 
-This variant gates the SoC release on real per-cell data instead of a fixed timer:
+This variant gates the SoC release on real per-cell data instead of a fixed timer. Works with
+either one or two real packs — set `pack_count` accordingly (see
+[Configuration reference](#configuration-reference)); everything below just says "the pack(s)"
+since the logic is identical either way, minus pack 2 in single-pack mode:
 
 1. The ghost starts **holding** (reports 0% SoC, 0 Ah remaining) — this blocks the array from
    ever reading 100%.
-2. It passively sniffs both real packs' own status responses as they pass by on the bus and
+2. It passively sniffs the real pack(s)' own status responses as they pass by on the bus and
    tracks each pack's min/max cell voltage and reported SoC.
-3. Once **every cell on both packs** is at or above `cell_full_low_mv` (default 3.46V) **and**
-   each pack's own highest-lowest cell spread is within `cell_balance_tolerance_mv` (default
-   20mV), the ghost releases: it reports 100% SoC and full capacity, so the inverter gets a
-   genuine full-charge signal and stops charging.
-4. As soon as pack 1 or pack 2's own reported SoC drops to `reset_soc_percent` (default 99%) —
+3. Once **every cell on every configured pack** is at or above `cell_full_low_mv` (default 3.46V)
+   **and** each pack's own highest-lowest cell spread is within `cell_balance_tolerance_mv`
+   (default 20mV), the ghost releases: it reports 100% SoC and full capacity, so the inverter
+   gets a genuine full-charge signal and stops charging.
+4. As soon as any configured pack's own reported SoC drops to `reset_soc_percent` (default 99%) —
    ie. discharging has started — the ghost re-arms back to holding, ready for the next cycle.
 5. `hold_failsafe_minutes` (default 240) is a safety backstop: if balance/full can never be
    confirmed (wrong address, wiring problem), the hold releases anyway after this long, so a
@@ -159,7 +162,8 @@ multimeter for continuity checks, and a lighter/heat gun for the heat-shrink.
    directory, eg. `/config/esphome/`, keeping the folder structure intact — `external_components`
    in the YAML resolves `path: components` relative to the YAML file.
 2. Copy `secrets.yaml` alongside it (or merge its keys into your existing one) and fill in your
-   real WiFi credentials, a generated API encryption key, and an OTA password.
+   real WiFi credentials, a generated API encryption key, an OTA password, and a fallback AP
+   password (`ap_fallback_password`, min. 8 characters).
 3. In the ESPHome Dashboard, open `jkbms-ghost-battery.yaml` and click **Validate** — it should
    list the full resolved config ending in `Configuration is valid!` with no errors. If it can't
    find the component, double check the folder name is exactly `components/jkbms_ghost_battery/`
@@ -167,6 +171,11 @@ multimeter for continuity checks, and a lighter/heat gun for the heat-shrink.
 4. Click **Install** for the first flash (USB required); later updates can go out over WiFi/OTA.
 5. Once online, Home Assistant will show a discovery notification for the device automatically
    (**Settings → Devices & services**) — no manual YAML editing needed on the HA side.
+
+If the device ever can't reach your WiFi (eg. you changed the password), it falls back to
+broadcasting a **"JKBMS Ghost Battery Fallback"** hotspot. Connect to it with a phone using the
+`ap_fallback_password` from your `secrets.yaml`, and a captive portal page lets you enter new
+WiFi credentials — no reflashing needed.
 
 ## Configuration reference
 
@@ -177,6 +186,8 @@ jkbms_ghost_battery:
   # old-style MAX485 module with separate DE+RE pins tied together:
   # de_pin: GPIO4
   ghost_address: 15       # must be an address with no physical battery
+  pack_count: 2           # 1 or 2 - set to 1 for a single-pack setup (pack2_address below is
+                           # then ignored entirely; no need to remove it)
   pack1_address: 0        # real master BMS address
   pack2_address: 1        # real pack 2 address - verify against your dip switches
   cell_full_low_mv: 3460        # every cell, both packs, must be at/above this voltage (mV)...
@@ -195,43 +206,109 @@ sensor:
       name: "Pack 2 min cell voltage"
     pack2_max_cell_voltage:
       name: "Pack 2 max cell voltage"
+    pack1_cell_voltage_diff:
+      name: "Pack 1 cell voltage diff"   # highest cell minus lowest cell in pack 1
+    pack2_cell_voltage_diff:
+      name: "Pack 2 cell voltage diff"   # highest cell minus lowest cell in pack 2
+    pack1_voltage:
+      name: "Pack 1 voltage"
+    pack2_voltage:
+      name: "Pack 2 voltage"
+    pack1_current:
+      name: "Pack 1 current"   # positive = charging, negative = discharging
+    pack2_current:
+      name: "Pack 2 current"
+    pack1_power:
+      name: "Pack 1 power"
+    pack2_power:
+      name: "Pack 2 power"
+    total_power:
+      name: "Total power"   # pack1 + pack2 power, straight sum
+    total_current:
+      name: "Total current"   # pack1 + pack2 current, straight sum
+    total_cell_voltage_diff:
+      name: "Total cell voltage diff"   # highest cell minus lowest cell across ALL cells, both packs
+    pack1_temperature:
+      name: "Pack 1 temperature"
+    pack2_temperature:
+      name: "Pack 2 temperature"
     pack1_soc:
       name: "Pack 1 SoC"
     pack2_soc:
       name: "Pack 2 SoC"
+    average_soc:
+      name: "Average SoC"   # (pack1 + pack2) / 2
+    average_voltage:
+      name: "Average voltage"   # (pack1 + pack2) / 2
     ghost_fake_soc:
       name: "Ghost fake SoC"   # what the ghost is currently telling the bus: 0 or 100
+    pack1_rcv_voltage:
+      name: "Pack 1 RCV"   # rated charge voltage from that pack's settings - read-only, passive
+                             # only (updates only if something else on the bus queries it)
+    pack2_rcv_voltage:
+      name: "Pack 2 RCV"
+    # individual cell voltages - pack1_cell_1 .. pack1_cell_16, pack2_cell_1 .. pack2_cell_16
+    # (32 total, all optional). See jkbms-ghost-battery.yaml for the full list.
+    # These are entity_category: diagnostic, so Home Assistant groups them into the device's
+    # collapsible "Diagnostic" section instead of the main sensor list.
+    pack1_cell_1:
+      name: "Pack 1 Cell 1"
+    pack1_cell_2:
+      name: "Pack 1 Cell 2"
+    # ...
 
 switch:
   - platform: jkbms_ghost_battery
     manual_override_armed:
-      name: "Ghost manual override armed"
+      name: "Ghost forced SOC enabled"
       restore_mode: ALWAYS_OFF
-    manual_force_full:
-      name: "Ghost force 100%"
-      restore_mode: ALWAYS_OFF
+
+number:
+  - platform: jkbms_ghost_battery
+    manual_force_soc:
+      name: "Ghost force SOC"
 ```
 
 All `sensor:` and `switch:` entries are optional individually — omit any you don't want.
 
 ## Home Assistant entities
 
-**`sensor:`** — pack 1/2 min & max cell voltage, pack 1/2 real SoC, and **ghost fake SoC** (7
-sensors). The first six are useful for watching your thresholds live and tuning
-`cell_full_low_mv`/`cell_balance_tolerance_mv` from actual graphs instead of guessing.
-`ghost_fake_soc` is the direct answer to "what is the fake battery doing right now" — it publishes
-exactly the 0 or 100 the ghost is telling the bus at that moment, updated every time it answers a
-status request.
+**`sensor:`** — 56 sensors, read passively off real traffic already on the bus (the ghost never
+queries anything itself for these):
+- Per pack (1 and 2): min/max cell voltage, cell voltage diff (max - min, ie. how far out of
+  balance that pack currently is), total voltage, current (positive = charging, negative =
+  discharging), power (voltage × current, kW), temperature, real SoC, and all 16 individual
+  cell voltages (`entity_category: diagnostic`, grouped into Home Assistant's collapsible
+  "Diagnostic" section on the device page instead of cluttering the main sensor list). Sourced
+  from the packs' own status responses, which something on the bus already polls every few
+  seconds.
+- **`average_soc`** and **`average_voltage`** — the mean of pack 1 and pack 2 (eg. 50% + 60% →
+  55%), only published once both packs have been seen at least once.
+- **`total_power`** and **`total_current`** — the straight sum of both packs (not an average),
+  same "once both packs have been seen" gating.
+- **`total_cell_voltage_diff`** — highest cell minus lowest cell across **all** cells on **all**
+  configured packs (not per-pack like the diffs above) — the single number that tells you how
+  out of balance the whole array is.
+- **`ghost_fake_soc`** — the direct answer to "what is the fake battery doing right now": exactly
+  the 0 or 100 the ghost is telling the bus at that moment, updated every time it answers a status
+  request.
+- **`pack1_rcv_voltage`** / **`pack2_rcv_voltage`** — each pack's own RCV (rated charge voltage)
+  setting. Read-only and truly passive: the ghost never requests a settings frame itself, so
+  these only update if something else on your bus (eg. the JK app, Solar Assistant) happens to
+  query that pack's settings. They may simply never update on your setup - that's expected, not
+  a bug.
 
-**`switch:`** — a manual override, deliberately built as a two-step interlock so it can't be
-triggered by accident:
-- **`manual_override_armed`** must be switched on first. While off, the automatic cell-balance
-  logic keeps running exactly as described above, untouched.
-- **`manual_force_full`** only does anything once armed: on forces the ghost to report 100%, off
-  forces it to report 0%. Flipping it while disarmed does nothing.
+**`switch:` + `number:`** — a manual override, deliberately built as a two-step interlock so it
+can't be triggered by accident:
+- **`manual_override_armed`** ("Ghost forced SOC enabled") must be switched on first. While off,
+  the automatic cell-balance logic keeps running exactly as described above, untouched.
+- **`manual_force_soc`** ("Ghost force SOC") only does anything once armed: a slider from 0-100,
+  fixed to a step of 100 so it only ever has two positions — 100 forces the ghost to report
+  100%, 0 forces it to report 0%. Moving it while disarmed does nothing.
 
-Both switches use `restore_mode: ALWAYS_OFF` in the example config — every reboot always comes
-back up disarmed and fully automatic, the same way `holding_` itself always starts at 0% on boot.
+`manual_override_armed` uses `restore_mode: ALWAYS_OFF` in the example config, and
+`manual_force_soc` isn't persisted at all — every reboot always comes back up disarmed and fully
+automatic, the same way `holding_` itself always starts at 0% on boot.
 
 ## Protocol notes
 
@@ -243,11 +320,31 @@ LiFePO4, address `0x0F`) and cross-checked against
 | Field | Byte offset | Format |
 |---|---|---|
 | Cell voltages (16 cells) | 6–37 | 2 bytes little-endian, mV, one pair per cell |
+| Total pack voltage | 150–153 | 4 bytes little-endian, mV |
+| Current | 158–161 | 4 bytes little-endian signed, mA (+ charging, - discharging) |
+| Temperature (T1 probe) | 162–163 | 2 bytes little-endian signed, 0.1°C |
 | SoC | 173 | 1 byte, percent |
 | Remaining capacity | 174–177 | 4 bytes little-endian, mAh |
 | Total capacity | 178–181 | 4 bytes little-endian, mAh |
 | Internal payload checksum | 299 | 1 byte, sum of bytes 0–298 mod 256 |
 | Source address (trailer echo) | 300 | 1 byte |
+
+The total-pack-voltage field was cross-checked by summing the 16 individual cell voltages — they
+matched to within 1mV on the reference capture, confirming both fields.
+
+The settings frame (`0x1E`, response type `0x01`) has a different, unshifted byte layout:
+
+| Field | Byte offset | Format |
+|---|---|---|
+| RCV (rated charge voltage) | 38–41 | 4 bytes little-endian, mV |
+| Cell count | 114–117 | 4 bytes little-endian |
+| Nominal capacity | 130–133 | 4 bytes little-endian, mAh |
+
+Verified against the reference capture: cell count reads exactly 16, and nominal capacity reads
+exactly 36000 (matching the 36Ah patch) at these offsets with no shift applied - unlike the
+status frame's fields above, which are shifted +32 bytes relative to the equivalent offsets in
+[esphome-jk-bms](https://github.com/txubelaxu/esphome-jk-bms) (that project's frame layout
+reserves extra space for a 32-cell variant that this one doesn't use).
 
 Any time the SoC/capacity bytes are patched, byte 299 is recomputed — otherwise the frame gets
 silently rejected downstream.
