@@ -21,7 +21,10 @@ wifi:
 captive_portal:
 
 logger:
-  level: INFO  # was DEBUG - pack1/pack2 detection and thresholds confirmed working
+  # DEBUG is required to see the "Pack 0x00 cells: ..." lines the README's safety section asks
+  # you to check before trusting this unattended. Drop to INFO once you've confirmed sniffing
+  # works on your own setup.
+  level: DEBUG
 
 api:
   encryption:

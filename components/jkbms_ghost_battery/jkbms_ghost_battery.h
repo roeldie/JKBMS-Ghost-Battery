@@ -100,7 +100,10 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   uint16_t cell_full_low_mv_{3460};
   uint16_t cell_balance_tolerance_mv_{20};
   uint8_t reset_soc_percent_{99};
-  uint32_t hold_failsafe_ms_{0};
+  // matches the YAML schema's own default (240 min) so a build that somehow skips codegen's
+  // set_hold_failsafe_ms() call still gets the safe default instead of the failsafe silently
+  // being disabled
+  uint32_t hold_failsafe_ms_{240 * 60000};
   uint32_t pack_stale_timeout_ms_{30000};
 
   uint8_t buf_[JK_FRAME_SIZE];
