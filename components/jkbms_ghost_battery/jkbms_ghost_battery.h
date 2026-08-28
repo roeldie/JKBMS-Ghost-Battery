@@ -4,6 +4,8 @@
 #include "esphome/core/hal.h"
 #include "esphome/components/uart/uart.h"
 #include "esphome/components/sensor/sensor.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 
 namespace esphome {
 namespace jkbms_ghost_battery {
@@ -69,6 +71,13 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   void set_pack1_rcv_voltage_sensor(sensor::Sensor *s) { this->pack1_rcv_voltage_sensor_ = s; }
   void set_pack2_rcv_voltage_sensor(sensor::Sensor *s) { this->pack2_rcv_voltage_sensor_ = s; }
 
+  // human-readable reason for the ghost's current hold/release decision (see evaluate_hold_()) -
+  // this is the "why", complementing ghost_fake_soc's raw "what" (0 or 100)
+  void set_hold_status_text_sensor(text_sensor::TextSensor *s) { this->hold_status_text_sensor_ = s; }
+  // on = that pack hasn't sent a fresh status frame within pack_stale_timeout_seconds
+  void set_pack1_data_stale_sensor(binary_sensor::BinarySensor *s) { this->pack1_data_stale_sensor_ = s; }
+  void set_pack2_data_stale_sensor(binary_sensor::BinarySensor *s) { this->pack2_data_stale_sensor_ = s; }
+
   // individual cell voltages, index 0-15 (cell 1-16)
   void set_pack1_cell_voltage_sensor(uint8_t index, sensor::Sensor *s) { this->pack1_cell_sensors_[index] = s; }
   void set_pack2_cell_voltage_sensor(uint8_t index, sensor::Sensor *s) { this->pack2_cell_sensors_[index] = s; }
@@ -89,6 +98,7 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   void send_response_(uint16_t len);
   void sniff_real_pack_();
   void evaluate_hold_();
+  void publish_hold_status_(const char *status);
   bool is_holding_() { return this->manual_override_armed_ ? (this->manual_force_soc_ < 50) : this->holding_; }
   uint16_t crc16_(uint16_t len);
 
@@ -121,6 +131,9 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   // pack that has gone silent (wiring fault, BMS reset, pack physically removed) so its last
   // cached reading isn't trusted indefinitely. See evaluate_hold_().
   uint32_t pack1_last_update_ms_{0}, pack2_last_update_ms_{0};
+  // last-published value of each pack's data-stale binary sensor, so publish_state() is only
+  // called on an actual change instead of every evaluate_hold_() tick
+  bool pack1_stale_published_{false}, pack2_stale_published_{false};
   uint16_t pack1_min_mv_{0}, pack1_max_mv_{0};
   uint16_t pack2_min_mv_{0}, pack2_max_mv_{0};
   uint8_t pack1_soc_{0}, pack2_soc_{0};
@@ -157,6 +170,10 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   sensor::Sensor *pack2_rcv_voltage_sensor_{nullptr};
   sensor::Sensor *pack1_cell_sensors_[16]{};
   sensor::Sensor *pack2_cell_sensors_[16]{};
+
+  text_sensor::TextSensor *hold_status_text_sensor_{nullptr};
+  binary_sensor::BinarySensor *pack1_data_stale_sensor_{nullptr};
+  binary_sensor::BinarySensor *pack2_data_stale_sensor_{nullptr};
 
   // both default to a disarmed/safe state, and are never persisted/restored across reboots by
   // this component - every boot starts fully automatic and disarmed, same as holding_ starting true

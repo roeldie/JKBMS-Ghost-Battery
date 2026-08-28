@@ -266,6 +266,18 @@ sensor:
       name: "Pack 1 Cell 2"
     # ...
 
+text_sensor:
+  - platform: jkbms_ghost_battery
+    hold_status:
+      name: "Ghost hold status"   # why the ghost is currently holding or released
+
+binary_sensor:
+  - platform: jkbms_ghost_battery
+    pack1_data_stale:
+      name: "Pack 1 data stale"   # on = no fresh reading within pack_stale_timeout_seconds
+    pack2_data_stale:
+      name: "Pack 2 data stale"
+
 switch:
   - platform: jkbms_ghost_battery
     manual_override_armed:
@@ -278,7 +290,8 @@ number:
       name: "Ghost force SOC"
 ```
 
-All `sensor:` and `switch:` entries are optional individually — omit any you don't want.
+All `sensor:`, `text_sensor:`, `binary_sensor:` and `switch:` entries are optional individually —
+omit any you don't want.
 
 ## Home Assistant entities
 
@@ -306,6 +319,18 @@ queries anything itself for these):
   these only update if something else on your bus (eg. the JK app, Solar Assistant) happens to
   query that pack's settings. They may simply never update on your setup - that's expected, not
   a bug.
+
+**`text_sensor:`**
+- **`hold_status`** — the "why" behind `ghost_fake_soc`'s raw "what". Reports a short reason
+  string each time the hold/release decision changes, eg. `"released - balanced and full"`,
+  `"released - failsafe (balance not confirmed)"`, `"holding - re-armed (SoC dropped)"`, or
+  `"holding - re-armed (data stale)"`. Starts as `"holding - waiting for pack data"` on boot.
+
+**`binary_sensor:`**
+- **`pack1_data_stale`** / **`pack2_data_stale`** — on when that pack hasn't sent a fresh status
+  frame within `pack_stale_timeout_seconds`. `entity_category: diagnostic`, so these show up in
+  the device's collapsible "Diagnostic" section - a good target for a Home Assistant notification
+  if you want to be alerted to a wiring or address problem instead of just watching the log.
 
 **`switch:` + `number:`** — a manual override, deliberately built as a two-step interlock so it
 can't be triggered by accident:

@@ -46,6 +46,8 @@ void JkBmsGhostBattery::setup() {
     this->de_pin_->digital_write(false);
   }
   this->hold_start_time_ = millis();
+  // starts holding (see holding_ default above) until a pack is seen and confirmed full/balanced
+  this->publish_hold_status_("holding - waiting for pack data");
 }
 
 void JkBmsGhostBattery::dump_config() {
@@ -84,6 +86,9 @@ void JkBmsGhostBattery::dump_config() {
   LOG_SENSOR("  ", "Average voltage", this->average_voltage_sensor_);
   LOG_SENSOR("  ", "Pack 1 RCV (rated charge voltage)", this->pack1_rcv_voltage_sensor_);
   LOG_SENSOR("  ", "Pack 2 RCV (rated charge voltage)", this->pack2_rcv_voltage_sensor_);
+  LOG_TEXT_SENSOR("  ", "Hold status", this->hold_status_text_sensor_);
+  LOG_BINARY_SENSOR("  ", "Pack 1 data stale", this->pack1_data_stale_sensor_);
+  LOG_BINARY_SENSOR("  ", "Pack 2 data stale", this->pack2_data_stale_sensor_);
 }
 
 void JkBmsGhostBattery::loop() {
@@ -359,6 +364,19 @@ void JkBmsGhostBattery::evaluate_hold_() {
   bool pack2_fresh = this->pack_count_ < 2 ||
                       (this->pack2_seen_ && (now - this->pack2_last_update_ms_) < this->pack_stale_timeout_ms_);
 
+  // dedicated stale sensors, one per pack - only publish on change so this doesn't spam the
+  // Home Assistant entity history on every single loop() tick
+  bool pack1_stale = this->pack1_seen_ && !pack1_fresh;
+  if (this->pack1_data_stale_sensor_ != nullptr && pack1_stale != this->pack1_stale_published_) {
+    this->pack1_data_stale_sensor_->publish_state(pack1_stale);
+    this->pack1_stale_published_ = pack1_stale;
+  }
+  bool pack2_stale = this->pack_count_ >= 2 && this->pack2_seen_ && !pack2_fresh;
+  if (this->pack2_data_stale_sensor_ != nullptr && pack2_stale != this->pack2_stale_published_) {
+    this->pack2_data_stale_sensor_->publish_state(pack2_stale);
+    this->pack2_stale_published_ = pack2_stale;
+  }
+
   if (this->holding_) {
     bool pack1_ok = pack1_fresh && this->pack1_min_mv_ >= this->cell_full_low_mv_ &&
                      (this->pack1_max_mv_ - this->pack1_min_mv_) <= this->cell_balance_tolerance_mv_;
@@ -370,9 +388,11 @@ void JkBmsGhostBattery::evaluate_hold_() {
       this->holding_ = false;
       ESP_LOGI(TAG, "Pack(s) balanced (<=%u mV spread) and full (>=%u mV) - releasing ghost SoC to 100%%",
                this->cell_balance_tolerance_mv_, this->cell_full_low_mv_);
+      this->publish_hold_status_("released - balanced and full");
     } else if (this->hold_failsafe_ms_ > 0 && (now - this->hold_start_time_) >= this->hold_failsafe_ms_) {
       this->holding_ = false;
       ESP_LOGW(TAG, "SoC hold failsafe reached - releasing to 100%% without confirmed balance");
+      this->publish_hold_status_("released - failsafe (balance not confirmed)");
     }
   } else {
     bool pack2_low = this->pack_count_ >= 2 && this->pack2_seen_ && this->pack2_soc_ <= this->reset_soc_percent_;
@@ -385,11 +405,18 @@ void JkBmsGhostBattery::evaluate_hold_() {
         // so don't keep telling the bus 100% on the strength of a reading that's no longer trusted
         ESP_LOGW(TAG, "Real pack data went stale (no update for >=%u ms) - re-arming ghost SoC hold to 0%% as a precaution",
                  (unsigned) this->pack_stale_timeout_ms_);
+        this->publish_hold_status_("holding - re-armed (data stale)");
       } else {
         ESP_LOGI(TAG, "Real pack SoC reached %u%% - re-arming ghost SoC hold to 0%%", this->reset_soc_percent_);
+        this->publish_hold_status_("holding - re-armed (SoC dropped)");
       }
     }
   }
+}
+
+void JkBmsGhostBattery::publish_hold_status_(const char *status) {
+  if (this->hold_status_text_sensor_ != nullptr)
+    this->hold_status_text_sensor_->publish_state(status);
 }
 
 uint16_t JkBmsGhostBattery::crc16_(uint16_t len) {

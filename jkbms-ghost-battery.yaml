@@ -192,6 +192,20 @@ sensor:
     pack2_cell_16:
       name: "Pack 2 Cell 16"
 
+text_sensor:
+  - platform: jkbms_ghost_battery
+    hold_status:
+      name: "Ghost hold status"   # why the ghost is currently holding or released, eg. "released -
+                                   # balanced and full" or "holding - re-armed (data stale)"
+
+binary_sensor:
+  - platform: jkbms_ghost_battery
+    pack1_data_stale:
+      name: "Pack 1 data stale"   # on = pack 1 hasn't sent a fresh reading within
+                                   # pack_stale_timeout_seconds - check wiring/address/power
+    pack2_data_stale:
+      name: "Pack 2 data stale"
+
 switch:
   - platform: jkbms_ghost_battery
     # arm this first (in Home Assistant) - while off, the "Ghost force SOC" slider below has no
