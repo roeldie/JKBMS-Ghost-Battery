@@ -21,7 +21,10 @@ wifi:
 captive_portal:
 
 logger:
-  level: INFO  # was DEBUG - pack1/pack2 detection and thresholds confirmed working
+  # DEBUG is required to see the "Pack 0x00 cells: ..." lines the README's safety section asks
+  # you to check before trusting this unattended. Drop to INFO once you've confirmed sniffing
+  # works on your own setup.
+  level: DEBUG
 
 api:
   encryption:
@@ -61,11 +64,18 @@ jkbms_ghost_battery:
   cell_full_low_mv: 3460       # every cell on both packs must be >= this voltage (mV)...
   cell_balance_tolerance_mv: 20 # ...AND each pack's own max-min cell spread must be within this
                                  # many mV - together, "full" and "balanced"
+  cell_full_max_temp_c: 50    # ...AND neither pack may be hotter than this (C) - release is
+                               # refused even if voltage/balance are fine. Set to 0 to disable.
   reset_soc_percent: 99   # once released, ghost drops back to 0% as soon as pack1 or pack2's own
                            # reported SoC falls to this percentage (ie. discharging has started)
   hold_failsafe_minutes: 240  # safety backstop: release to 100% after this long even without
                                # confirmed balance, so a wiring/address mistake can't cause
                                # indefinite overcharge. Set to 0 to disable.
+  pack_stale_timeout_seconds: 30  # if a pack hasn't sent a fresh status frame in this long, its
+                                   # cached reading is no longer trusted: release is refused, and
+                                   # an already-released hold re-arms as a precaution (wiring
+                                   # fault, BMS reset, pack disconnected). Real packs are normally
+                                   # polled every few seconds, so keep this well above that.
 
 sensor:
   - platform: jkbms_ghost_battery
@@ -118,6 +128,14 @@ sensor:
                              # only (updates only if something else on the bus queries it)
     pack2_rcv_voltage:
       name: "Pack 2 RCV"
+    bus_error_count:
+      name: "Bus CRC error count"   # rising count = RS485 wiring/termination/noise problem
+    hold_failsafe_remaining:
+      name: "Hold failsafe remaining"   # seconds until hold_failsafe_minutes forces a release
+    total_charge_energy:
+      name: "Total charge energy"     # for the Home Assistant Energy dashboard - resets on reboot
+    total_discharge_energy:
+      name: "Total discharge energy"
     # individual cell voltages - all 32 optional, add/remove any you don't want
     pack1_cell_1:
       name: "Pack 1 Cell 1"
@@ -183,6 +201,20 @@ sensor:
       name: "Pack 2 Cell 15"
     pack2_cell_16:
       name: "Pack 2 Cell 16"
+
+text_sensor:
+  - platform: jkbms_ghost_battery
+    hold_status:
+      name: "Ghost hold status"   # why the ghost is currently holding or released, eg. "released -
+                                   # balanced and full" or "holding - re-armed (data stale)"
+
+binary_sensor:
+  - platform: jkbms_ghost_battery
+    pack1_data_stale:
+      name: "Pack 1 data stale"   # on = pack 1 hasn't sent a fresh reading within
+                                   # pack_stale_timeout_seconds - check wiring/address/power
+    pack2_data_stale:
+      name: "Pack 2 data stale"
 
 switch:
   - platform: jkbms_ghost_battery

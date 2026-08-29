@@ -4,15 +4,20 @@ from esphome.components import sensor
 from esphome.const import (
     DEVICE_CLASS_BATTERY,
     DEVICE_CLASS_CURRENT,
+    DEVICE_CLASS_DURATION,
+    DEVICE_CLASS_ENERGY,
     DEVICE_CLASS_POWER,
     DEVICE_CLASS_TEMPERATURE,
     DEVICE_CLASS_VOLTAGE,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
+    STATE_CLASS_TOTAL_INCREASING,
     UNIT_AMPERE,
     UNIT_CELSIUS,
     UNIT_KILOWATT,
+    UNIT_KILOWATT_HOURS,
     UNIT_PERCENT,
+    UNIT_SECOND,
     UNIT_VOLT,
 )
 
@@ -104,6 +109,26 @@ SENSORS = [
     ("pack2_rcv_voltage", "set_pack2_rcv_voltage_sensor",
      dict(unit_of_measurement=UNIT_VOLT, accuracy_decimals=3, device_class=DEVICE_CLASS_VOLTAGE,
           state_class=STATE_CLASS_MEASUREMENT, icon="mdi:battery-charging-high")),
+    # counts CRC failures on frames that were otherwise structured like a query addressed to us -
+    # a rising count points at RS485 wiring/termination/noise problems
+    ("bus_error_count", "set_bus_error_count_sensor",
+     dict(icon="mdi:alert-circle-outline", state_class=STATE_CLASS_TOTAL_INCREASING,
+          entity_category=ENTITY_CATEGORY_DIAGNOSTIC)),
+    # seconds left before hold_failsafe_minutes forces a release without confirmed balance - 0
+    # while released, or while the failsafe is disabled
+    ("hold_failsafe_remaining", "set_hold_failsafe_remaining_sensor",
+     dict(unit_of_measurement=UNIT_SECOND, accuracy_decimals=0, device_class=DEVICE_CLASS_DURATION,
+          state_class=STATE_CLASS_MEASUREMENT, icon="mdi:timer-sand",
+          entity_category=ENTITY_CATEGORY_DIAGNOSTIC)),
+    # running kWh totals for the Home Assistant Energy dashboard - energy into/out of the
+    # battery. Reset to 0 on every reboot; HA's total_increasing state class treats a drop as a
+    # normal meter reset.
+    ("total_charge_energy", "set_total_charge_energy_sensor",
+     dict(unit_of_measurement=UNIT_KILOWATT_HOURS, accuracy_decimals=3, device_class=DEVICE_CLASS_ENERGY,
+          state_class=STATE_CLASS_TOTAL_INCREASING, icon="mdi:battery-arrow-up")),
+    ("total_discharge_energy", "set_total_discharge_energy_sensor",
+     dict(unit_of_measurement=UNIT_KILOWATT_HOURS, accuracy_decimals=3, device_class=DEVICE_CLASS_ENERGY,
+          state_class=STATE_CLASS_TOTAL_INCREASING, icon="mdi:battery-arrow-down")),
 ]
 
 # entity_category=diagnostic groups all 32 of these into the device's collapsible "Diagnostic"
