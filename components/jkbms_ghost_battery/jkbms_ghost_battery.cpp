@@ -184,8 +184,9 @@ bool JkBmsGhostBattery::is_query_for_us_() {
 void JkBmsGhostBattery::send_frame1_() {
   memcpy(this->buf_, FRAME1_RESPONSE, JK_FRAME_SIZE);
   // the captured template hardcodes its source pack's own address (0x0F) at this offset; patch
-  // it to whatever ghost_address is actually configured so the frame is internally consistent
-  this->buf_[SOURCE_ADDRESS_OFFSET] = this->ghost_address_;
+  // it to whatever ghost_address is actually configured (and its trailer CRC) so the frame is
+  // internally consistent - see patch_source_address_()
+  this->patch_source_address_();
   this->send_response_(JK_FRAME_SIZE);
 }
 
@@ -193,10 +194,12 @@ void JkBmsGhostBattery::send_frame2_() {
   memcpy(this->buf_, FRAME2_RESPONSE, JK_FRAME_SIZE);
 
   // the captured template hardcodes its source pack's own address (0x0F) at this offset; patch
-  // it to whatever ghost_address is actually configured. Only matters when ghost_address is set
-  // to something other than the default 15 - otherwise this is a no-op, since 15 == 0x0F is
-  // exactly what the template already contains. Must happen before the checksum recompute below.
-  this->buf_[SOURCE_ADDRESS_OFFSET] = this->ghost_address_;
+  // it to whatever ghost_address is actually configured (and its trailer CRC) - see
+  // patch_source_address_(). Only matters when ghost_address is set to something other than the
+  // default 15, otherwise this is a no-op, since 15 == 0x0F is exactly what the template already
+  // contains. Independent of the checksum recompute below - CHECKSUM_OFFSET (299) doesn't cover
+  // the trailer this touches.
+  this->patch_source_address_();
 
   // TEST: hold the ghost's reported SoC at 0% until both real packs are confirmed full and
   // balanced (see evaluate_hold_()); then switch to 100%/full so the inverter gets a genuine
@@ -250,8 +253,9 @@ void JkBmsGhostBattery::send_frame2_() {
 void JkBmsGhostBattery::send_frame3_() {
   memcpy(this->buf_, FRAME3_RESPONSE, JK_FRAME_SIZE);
   // the captured template hardcodes its source pack's own address (0x0F) at this offset; patch
-  // it to whatever ghost_address is actually configured so the frame is internally consistent
-  this->buf_[SOURCE_ADDRESS_OFFSET] = this->ghost_address_;
+  // it to whatever ghost_address is actually configured (and its trailer CRC) so the frame is
+  // internally consistent - see patch_source_address_()
+  this->patch_source_address_();
   this->send_response_(JK_FRAME_SIZE);
 }
 
@@ -495,6 +499,28 @@ void JkBmsGhostBattery::evaluate_hold_() {
 void JkBmsGhostBattery::publish_hold_status_(const char *status) {
   if (this->hold_status_text_sensor_ != nullptr)
     this->hold_status_text_sensor_->publish_state(status);
+}
+
+void JkBmsGhostBattery::patch_source_address_() {
+  this->buf_[SOURCE_ADDRESS_OFFSET] = this->ghost_address_;
+
+  // The trailer's own trailing 2 bytes (JK_FRAME_SIZE-2/-1) are a Modbus CRC16 that covers ONLY
+  // the 6-byte trailer starting at SOURCE_ADDRESS_OFFSET (address, function, subfunction, frame
+  // type, 0x00, 0x01) - not the whole frame. Since the line above just changed the first of those
+  // 6 bytes, that CRC is now stale for any ghost_address other than the default 15 (0x0F, what the
+  // static template was captured with) and must be recomputed, or a real master that validates
+  // response CRCs would reject the frame outright.
+  uint16_t value = 0xFFFF;
+  for (uint16_t i = SOURCE_ADDRESS_OFFSET; i < SOURCE_ADDRESS_OFFSET + 6; i++) {
+    value ^= (uint16_t) this->buf_[i];
+    for (uint8_t j = 0; j < 8; j++) {
+      bool lsb = value & 1;
+      value >>= 1;
+      if (lsb) value ^= 0xA001;
+    }
+  }
+  this->buf_[JK_FRAME_SIZE - 2] = (uint8_t) (value & 0xFF);
+  this->buf_[JK_FRAME_SIZE - 1] = (uint8_t) ((value >> 8) & 0xFF);
 }
 
 uint16_t JkBmsGhostBattery::crc16_(uint16_t len) {

@@ -116,6 +116,7 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   void publish_hold_status_(const char *status);
   bool is_holding_() { return this->manual_override_armed_ ? (this->manual_force_soc_ < 50) : this->holding_; }
   uint16_t crc16_(uint16_t len);
+  void patch_source_address_();
 
   GPIOPin *de_pin_{nullptr};
   uint8_t ghost_address_{15};

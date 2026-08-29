@@ -391,9 +391,16 @@ LiFePO4, address `0x0F`) and cross-checked against
 | Total capacity | 178–181 | 4 bytes little-endian, mAh |
 | Internal payload checksum | 299 | 1 byte, sum of bytes 0–298 mod 256 |
 | Source address (trailer echo) | 300 | 1 byte |
+| Trailer CRC16 | 306–307 | Modbus CRC16 over bytes 300–305 only (not the whole frame) |
 
 The total-pack-voltage field was cross-checked by summing the 16 individual cell voltages — they
 matched to within 1mV on the reference capture, confirming both fields.
+
+Bytes 300–305 are an echo of the query that was sent (address, function, subfunction, frame type,
+`0x00`, `0x01`), and bytes 306–307 are a Modbus CRC16 over just those 6 bytes — a completely
+separate checksum from the payload one at byte 299. Any time byte 300 (the source address) is
+patched — eg. to make the ghost's responses reflect a non-default `ghost_address` — this trailer
+CRC has to be recomputed too, or a master that validates response CRCs will reject the frame.
 
 The settings frame (`0x1E`, response type `0x01`) has a different, unshifted byte layout:
 

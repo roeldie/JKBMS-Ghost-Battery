@@ -21,10 +21,9 @@ wifi:
 captive_portal:
 
 logger:
-  # DEBUG is required to see the "Pack 0x00 cells: ..." lines the README's safety section asks
-  # you to check before trusting this unattended. Drop to INFO once you've confirmed sniffing
-  # works on your own setup.
-  level: DEBUG
+  # set to DEBUG temporarily if you need to see the "Pack 0x00 cells: ..." lines the README's
+  # safety section asks you to check when first setting this up on new hardware
+  level: INFO
 
 api:
   encryption:
