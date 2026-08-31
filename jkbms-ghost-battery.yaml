@@ -135,6 +135,16 @@ sensor:
       name: "Total charge energy"     # for the Home Assistant Energy dashboard - resets on reboot
     total_discharge_energy:
       name: "Total discharge energy"
+    # state of health and fault count come straight from the real pack, independent of whatever
+    # SoC the ghost is currently telling the inverter - useful assurance even while it's holding
+    pack1_soh:
+      name: "Pack 1 SOH"
+    pack2_soh:
+      name: "Pack 2 SOH"
+    pack1_fault_count:
+      name: "Pack 1 fault count"   # rising count = pack 1 has logged a fault since power-up
+    pack2_fault_count:
+      name: "Pack 2 fault count"
     # individual cell voltages - all 32 optional, add/remove any you don't want
     pack1_cell_1:
       name: "Pack 1 Cell 1"
@@ -206,6 +216,12 @@ text_sensor:
     hold_status:
       name: "Ghost hold status"   # why the ghost is currently holding or released, eg. "released -
                                    # balanced and full" or "holding - re-armed (data stale)"
+    # "none", or a comma-separated list of the real pack's own active alarm/protection bits -
+    # this is the truth about the real BMS, regardless of what the ghost is telling the inverter
+    pack1_protection_flags:
+      name: "Pack 1 protection flags"
+    pack2_protection_flags:
+      name: "Pack 2 protection flags"
 
 binary_sensor:
   - platform: jkbms_ghost_battery
@@ -214,6 +230,25 @@ binary_sensor:
                                    # pack_stale_timeout_seconds - check wiring/address/power
     pack2_data_stale:
       name: "Pack 2 data stale"
+    # on = the real pack's own MOS is currently allowing that direction of current. Off is a
+    # real, expected state (eg. discharge MOS off when nothing is drawing current, or when the
+    # pack has actually cut off due to a protection trip) - cross-check against the protection
+    # flags/active sensors below rather than treating "off" as an alarm by itself.
+    pack1_charge_mos:
+      name: "Pack 1 charge MOS"
+    pack2_charge_mos:
+      name: "Pack 2 charge MOS"
+    pack1_discharge_mos:
+      name: "Pack 1 discharge MOS"
+    pack2_discharge_mos:
+      name: "Pack 2 discharge MOS"
+    # on = the real pack is reporting at least one of its own alarm/protection bits - independent
+    # of the ghost's spoofed SoC, so this stays a genuine "is something actually wrong" check even
+    # while the ghost is holding at 0% or forcing 100%
+    pack1_protection_active:
+      name: "Pack 1 protection active"
+    pack2_protection_active:
+      name: "Pack 2 protection active"
 
 switch:
   - platform: jkbms_ghost_battery

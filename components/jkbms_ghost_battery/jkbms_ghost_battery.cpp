@@ -1,6 +1,7 @@
 #include "jkbms_ghost_battery.h"
 #include "esphome/core/log.h"
 #include <cstring>
+#include <string>
 
 namespace esphome {
 namespace jkbms_ghost_battery {
@@ -40,6 +41,45 @@ static const uint16_t TEMPERATURE_OFFSET = 162;    // 2 bytes little-endian sign
 // offsets exactly with no shift needed)
 static const uint16_t RCV_OFFSET = 38;  // "rated/requested charge voltage", 4 bytes little-endian, mV
 
+// protection/health offsets within a 308-byte frame2 status packet - these come from the real
+// BMS's own protection logic, independent of whatever SoC the ghost is currently telling the bus,
+// so they stay useful for safety/assurance even while the ghost is actively holding or spoofing.
+// Cross-checked against this project's own already-verified offsets (150/158/162/173 all matched
+// a third-party JK 55AA protocol reference exactly), which is what gives confidence in these too.
+static const uint16_t ALARM_BITS_OFFSET = 166;    // 4 bytes little-endian, one bit per fault - see
+                                                   // decode_protection_flags_() for the bit list
+static const uint16_t SOH_OFFSET = 190;           // 1 byte, state of health, 0-100%
+static const uint16_t CHARGE_MOS_OFFSET = 198;    // 1 byte, 0 = off (charge cut off), 1 = on
+static const uint16_t DISCHARGE_MOS_OFFSET = 199; // 1 byte, 0 = off (discharge cut off), 1 = on
+static const uint16_t FAULT_COUNT_OFFSET = 266;   // 1 byte, rising count = a fault has been logged
+
+// Turns the alarm bit field into a short, human-readable list of active faults, eg.
+// "cell OVP, discharge OCP", or "none" when nothing is set. Only the 24 documented bits are
+// named; anything outside that range still shows up as "other (bit N)" instead of being dropped
+// silently, since an unnamed active bit is still worth knowing about.
+static std::string decode_protection_flags_(uint32_t bits) {
+  static const char *const NAMES[24] = {
+      "battery SCP", "MOS over-temp", "cell qty mismatch", "cell OVP", "cell UVP", "battery OVP",
+      "battery UVP", "charge OCP", "discharge OCP", "charge over-temp", "aux CPU comm fault",
+      "cell UVP (2nd)", "battery OVP (2nd)", "battery UVP (2nd)", "charge OCP (2nd)",
+      "discharge OCP (2nd)", "charge low-temp", "discharge over-temp", "GPS disconnected",
+      "password reminder", "discharge activate failure", "battery temp sensor anomaly",
+      "temp sensor anomaly", "parallel module fault"};
+  if (bits == 0) return "none";
+  std::string result;
+  for (uint8_t bit = 0; bit < 24; bit++) {
+    if (!(bits & (1UL << bit))) continue;
+    if (!result.empty()) result += ", ";
+    result += NAMES[bit];
+  }
+  for (uint8_t bit = 24; bit < 32; bit++) {
+    if (!(bits & (1UL << bit))) continue;
+    if (!result.empty()) result += ", ";
+    result += "other (bit " + std::to_string(bit) + ")";
+  }
+  return result;
+}
+
 void JkBmsGhostBattery::setup() {
   if (this->de_pin_ != nullptr) {
     this->de_pin_->setup();
@@ -62,6 +102,23 @@ void JkBmsGhostBattery::setup() {
     this->publish_hold_status_("holding - waiting for pack data");
   } else {
     this->publish_hold_status_("released (restored from flash)");
+  }
+
+  // these sensors only call publish_state() from inside evaluate_hold_()/is_query_for_us_() when
+  // their value actually changes from its previous (in-memory) value - great for not spamming HA's
+  // entity history, but it means a sensor whose value never changes from its own default (a bus
+  // with zero CRC errors, a pack that never goes stale) never gets its first publish_state() call
+  // at all and shows as "Unknown" in Home Assistant forever, even though the real value is known
+  // and simply hasn't changed. Publish the true initial value here, once, unconditionally, so
+  // every sensor has a real state from boot instead of only after its first change.
+  if (this->bus_error_count_sensor_ != nullptr) this->bus_error_count_sensor_->publish_state(this->bus_error_count_);
+  if (this->pack1_data_stale_sensor_ != nullptr) this->pack1_data_stale_sensor_->publish_state(this->pack1_stale_published_);
+  if (this->pack2_data_stale_sensor_ != nullptr) this->pack2_data_stale_sensor_->publish_state(this->pack2_stale_published_);
+  if (this->hold_failsafe_remaining_sensor_ != nullptr) {
+    uint32_t initial_remaining_s = 0;
+    if (this->holding_ && this->hold_failsafe_ms_ > 0) initial_remaining_s = this->hold_failsafe_ms_ / 1000;
+    this->hold_failsafe_remaining_sensor_->publish_state(initial_remaining_s);
+    this->hold_failsafe_remaining_published_s_ = initial_remaining_s;
   }
 }
 
@@ -110,9 +167,21 @@ void JkBmsGhostBattery::dump_config() {
   LOG_SENSOR("  ", "Hold failsafe remaining", this->hold_failsafe_remaining_sensor_);
   LOG_SENSOR("  ", "Total charge energy", this->total_charge_energy_sensor_);
   LOG_SENSOR("  ", "Total discharge energy", this->total_discharge_energy_sensor_);
+  LOG_SENSOR("  ", "Pack 1 SOH", this->pack1_soh_sensor_);
+  LOG_SENSOR("  ", "Pack 2 SOH", this->pack2_soh_sensor_);
+  LOG_SENSOR("  ", "Pack 1 fault count", this->pack1_fault_count_sensor_);
+  LOG_SENSOR("  ", "Pack 2 fault count", this->pack2_fault_count_sensor_);
   LOG_TEXT_SENSOR("  ", "Hold status", this->hold_status_text_sensor_);
+  LOG_TEXT_SENSOR("  ", "Pack 1 protection flags", this->pack1_protection_flags_text_sensor_);
+  LOG_TEXT_SENSOR("  ", "Pack 2 protection flags", this->pack2_protection_flags_text_sensor_);
   LOG_BINARY_SENSOR("  ", "Pack 1 data stale", this->pack1_data_stale_sensor_);
   LOG_BINARY_SENSOR("  ", "Pack 2 data stale", this->pack2_data_stale_sensor_);
+  LOG_BINARY_SENSOR("  ", "Pack 1 charge MOS", this->pack1_charge_mos_sensor_);
+  LOG_BINARY_SENSOR("  ", "Pack 2 charge MOS", this->pack2_charge_mos_sensor_);
+  LOG_BINARY_SENSOR("  ", "Pack 1 discharge MOS", this->pack1_discharge_mos_sensor_);
+  LOG_BINARY_SENSOR("  ", "Pack 2 discharge MOS", this->pack2_discharge_mos_sensor_);
+  LOG_BINARY_SENSOR("  ", "Pack 1 protection active", this->pack1_protection_active_sensor_);
+  LOG_BINARY_SENSOR("  ", "Pack 2 protection active", this->pack2_protection_active_sensor_);
 }
 
 void JkBmsGhostBattery::loop() {
@@ -313,6 +382,15 @@ void JkBmsGhostBattery::sniff_real_pack_() {
                         ((uint32_t) this->buf_[CURRENT_OFFSET + 2] << 16) | ((uint32_t) this->buf_[CURRENT_OFFSET + 3] << 24));
   int16_t temperature_c10 = (int16_t) (this->buf_[TEMPERATURE_OFFSET] | ((uint16_t) this->buf_[TEMPERATURE_OFFSET + 1] << 8));
 
+  // protection/health fields - see the offset comments above for where these come from
+  uint32_t alarm_bits = this->buf_[ALARM_BITS_OFFSET] | ((uint32_t) this->buf_[ALARM_BITS_OFFSET + 1] << 8) |
+                        ((uint32_t) this->buf_[ALARM_BITS_OFFSET + 2] << 16) |
+                        ((uint32_t) this->buf_[ALARM_BITS_OFFSET + 3] << 24);
+  uint8_t soh = this->buf_[SOH_OFFSET];
+  bool charge_mos_on = this->buf_[CHARGE_MOS_OFFSET] != 0;
+  bool discharge_mos_on = this->buf_[DISCHARGE_MOS_OFFSET] != 0;
+  uint8_t fault_count = this->buf_[FAULT_COUNT_OFFSET];
+
   if (source_address == this->pack1_address_) {
     this->pack1_min_mv_ = min_mv;
     this->pack1_max_mv_ = max_mv;
@@ -335,6 +413,13 @@ void JkBmsGhostBattery::sniff_real_pack_() {
       this->pack1_cell_mv_[c] = cell_mv[c];
       if (this->pack1_cell_sensors_[c] != nullptr) this->pack1_cell_sensors_[c]->publish_state(cell_mv[c] / 1000.0f);
     }
+    if (this->pack1_charge_mos_sensor_ != nullptr) this->pack1_charge_mos_sensor_->publish_state(charge_mos_on);
+    if (this->pack1_discharge_mos_sensor_ != nullptr) this->pack1_discharge_mos_sensor_->publish_state(discharge_mos_on);
+    if (this->pack1_protection_active_sensor_ != nullptr) this->pack1_protection_active_sensor_->publish_state(alarm_bits != 0);
+    if (this->pack1_protection_flags_text_sensor_ != nullptr)
+      this->pack1_protection_flags_text_sensor_->publish_state(decode_protection_flags_(alarm_bits));
+    if (this->pack1_soh_sensor_ != nullptr) this->pack1_soh_sensor_->publish_state(soh);
+    if (this->pack1_fault_count_sensor_ != nullptr) this->pack1_fault_count_sensor_->publish_state(fault_count);
   } else {
     this->pack2_min_mv_ = min_mv;
     this->pack2_max_mv_ = max_mv;
@@ -357,6 +442,13 @@ void JkBmsGhostBattery::sniff_real_pack_() {
       this->pack2_cell_mv_[c] = cell_mv[c];
       if (this->pack2_cell_sensors_[c] != nullptr) this->pack2_cell_sensors_[c]->publish_state(cell_mv[c] / 1000.0f);
     }
+    if (this->pack2_charge_mos_sensor_ != nullptr) this->pack2_charge_mos_sensor_->publish_state(charge_mos_on);
+    if (this->pack2_discharge_mos_sensor_ != nullptr) this->pack2_discharge_mos_sensor_->publish_state(discharge_mos_on);
+    if (this->pack2_protection_active_sensor_ != nullptr) this->pack2_protection_active_sensor_->publish_state(alarm_bits != 0);
+    if (this->pack2_protection_flags_text_sensor_ != nullptr)
+      this->pack2_protection_flags_text_sensor_->publish_state(decode_protection_flags_(alarm_bits));
+    if (this->pack2_soh_sensor_ != nullptr) this->pack2_soh_sensor_->publish_state(soh);
+    if (this->pack2_fault_count_sensor_ != nullptr) this->pack2_fault_count_sensor_->publish_state(fault_count);
   }
 
   // in single-pack mode, the "average" is just pack1's own value

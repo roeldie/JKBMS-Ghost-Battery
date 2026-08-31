@@ -129,6 +129,23 @@ SENSORS = [
     ("total_discharge_energy", "set_total_discharge_energy_sensor",
      dict(unit_of_measurement=UNIT_KILOWATT_HOURS, accuracy_decimals=3, device_class=DEVICE_CLASS_ENERGY,
           state_class=STATE_CLASS_TOTAL_INCREASING, icon="mdi:battery-arrow-down")),
+    # state of health, straight from the pack's own status frame - a slow long-term decline is
+    # normal aging, a sudden drop is worth investigating regardless of what the ghost is doing
+    ("pack1_soh", "set_pack1_soh_sensor",
+     dict(unit_of_measurement=UNIT_PERCENT, accuracy_decimals=0, device_class=DEVICE_CLASS_BATTERY,
+          state_class=STATE_CLASS_MEASUREMENT, icon="mdi:heart-pulse",
+          entity_category=ENTITY_CATEGORY_DIAGNOSTIC)),
+    ("pack2_soh", "set_pack2_soh_sensor",
+     dict(unit_of_measurement=UNIT_PERCENT, accuracy_decimals=0, device_class=DEVICE_CLASS_BATTERY,
+          state_class=STATE_CLASS_MEASUREMENT, icon="mdi:heart-pulse",
+          entity_category=ENTITY_CATEGORY_DIAGNOSTIC)),
+    # rising count = the pack has logged a fault since power-up - a steady value is reassuring
+    ("pack1_fault_count", "set_pack1_fault_count_sensor",
+     dict(icon="mdi:alert-circle-outline", state_class=STATE_CLASS_TOTAL_INCREASING,
+          entity_category=ENTITY_CATEGORY_DIAGNOSTIC)),
+    ("pack2_fault_count", "set_pack2_fault_count_sensor",
+     dict(icon="mdi:alert-circle-outline", state_class=STATE_CLASS_TOTAL_INCREASING,
+          entity_category=ENTITY_CATEGORY_DIAGNOSTIC)),
 ]
 
 # entity_category=diagnostic groups all 32 of these into the device's collapsible "Diagnostic"

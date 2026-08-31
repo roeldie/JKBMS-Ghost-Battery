@@ -93,6 +93,27 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   void set_pack1_data_stale_sensor(binary_sensor::BinarySensor *s) { this->pack1_data_stale_sensor_ = s; }
   void set_pack2_data_stale_sensor(binary_sensor::BinarySensor *s) { this->pack2_data_stale_sensor_ = s; }
 
+  // protection/health sensors sourced from the real pack's own status frame - these reflect what
+  // the actual BMS is reporting, independent of whatever SoC the ghost is currently telling the
+  // inverter, so they stay meaningful for safety/assurance even while the ghost is holding or
+  // spoofing. See ALARM_BITS_OFFSET etc in jkbms_ghost_battery.cpp for where they come from.
+  void set_pack1_charge_mos_sensor(binary_sensor::BinarySensor *s) { this->pack1_charge_mos_sensor_ = s; }
+  void set_pack2_charge_mos_sensor(binary_sensor::BinarySensor *s) { this->pack2_charge_mos_sensor_ = s; }
+  void set_pack1_discharge_mos_sensor(binary_sensor::BinarySensor *s) { this->pack1_discharge_mos_sensor_ = s; }
+  void set_pack2_discharge_mos_sensor(binary_sensor::BinarySensor *s) { this->pack2_discharge_mos_sensor_ = s; }
+  // on = the real pack is currently reporting at least one active alarm/protection bit of its own
+  void set_pack1_protection_active_sensor(binary_sensor::BinarySensor *s) { this->pack1_protection_active_sensor_ = s; }
+  void set_pack2_protection_active_sensor(binary_sensor::BinarySensor *s) { this->pack2_protection_active_sensor_ = s; }
+  // "none", or a comma-separated list of which fault(s) are set - see decode_protection_flags_()
+  void set_pack1_protection_flags_text_sensor(text_sensor::TextSensor *s) { this->pack1_protection_flags_text_sensor_ = s; }
+  void set_pack2_protection_flags_text_sensor(text_sensor::TextSensor *s) { this->pack2_protection_flags_text_sensor_ = s; }
+  void set_pack1_soh_sensor(sensor::Sensor *s) { this->pack1_soh_sensor_ = s; }
+  void set_pack2_soh_sensor(sensor::Sensor *s) { this->pack2_soh_sensor_ = s; }
+  // rising count = the pack has logged a fault since power-up - a steady value is reassuring, a
+  // jump means something tripped even if the condition has since cleared
+  void set_pack1_fault_count_sensor(sensor::Sensor *s) { this->pack1_fault_count_sensor_ = s; }
+  void set_pack2_fault_count_sensor(sensor::Sensor *s) { this->pack2_fault_count_sensor_ = s; }
+
   // individual cell voltages, index 0-15 (cell 1-16)
   void set_pack1_cell_voltage_sensor(uint8_t index, sensor::Sensor *s) { this->pack1_cell_sensors_[index] = s; }
   void set_pack2_cell_voltage_sensor(uint8_t index, sensor::Sensor *s) { this->pack2_cell_sensors_[index] = s; }
@@ -208,12 +229,24 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   sensor::Sensor *hold_failsafe_remaining_sensor_{nullptr};
   sensor::Sensor *total_charge_energy_sensor_{nullptr};
   sensor::Sensor *total_discharge_energy_sensor_{nullptr};
+  sensor::Sensor *pack1_soh_sensor_{nullptr};
+  sensor::Sensor *pack2_soh_sensor_{nullptr};
+  sensor::Sensor *pack1_fault_count_sensor_{nullptr};
+  sensor::Sensor *pack2_fault_count_sensor_{nullptr};
   sensor::Sensor *pack1_cell_sensors_[16]{};
   sensor::Sensor *pack2_cell_sensors_[16]{};
 
   text_sensor::TextSensor *hold_status_text_sensor_{nullptr};
+  text_sensor::TextSensor *pack1_protection_flags_text_sensor_{nullptr};
+  text_sensor::TextSensor *pack2_protection_flags_text_sensor_{nullptr};
   binary_sensor::BinarySensor *pack1_data_stale_sensor_{nullptr};
   binary_sensor::BinarySensor *pack2_data_stale_sensor_{nullptr};
+  binary_sensor::BinarySensor *pack1_charge_mos_sensor_{nullptr};
+  binary_sensor::BinarySensor *pack2_charge_mos_sensor_{nullptr};
+  binary_sensor::BinarySensor *pack1_discharge_mos_sensor_{nullptr};
+  binary_sensor::BinarySensor *pack2_discharge_mos_sensor_{nullptr};
+  binary_sensor::BinarySensor *pack1_protection_active_sensor_{nullptr};
+  binary_sensor::BinarySensor *pack2_protection_active_sensor_{nullptr};
 
   // both default to a disarmed/safe state, and are never persisted/restored across reboots by
   // this component - every boot starts fully automatic and disarmed, same as holding_ starting true

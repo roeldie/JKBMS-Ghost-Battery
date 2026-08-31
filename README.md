@@ -310,7 +310,7 @@ omit any you don't want.
 
 ## Home Assistant entities
 
-**`sensor:`** — 60 sensors, read passively off real traffic already on the bus (the ghost never
+**`sensor:`** — 64 sensors, read passively off real traffic already on the bus (the ghost never
 queries anything itself for these):
 - Per pack (1 and 2): min/max cell voltage, cell voltage diff (max - min, ie. how far out of
   balance that pack currently is), total voltage, current (positive = charging, negative =
@@ -346,6 +346,12 @@ queries anything itself for these):
   Assistant's Energy dashboard as battery storage sensors. Like any in-memory counter on this
   device, both reset to 0 on every reboot — HA's `total_increasing` state class treats that as a
   normal meter reset, the same way a real energy meter behaves after a power cut.
+- **`pack1_soh`** / **`pack2_soh`** — each pack's own state-of-health percentage, straight off its
+  status frame. A slow decline over months/years is normal aging; a sudden drop is worth
+  investigating regardless of what the ghost is doing. `entity_category: diagnostic`.
+- **`pack1_fault_count`** / **`pack2_fault_count`** — a rising count the pack itself keeps of
+  faults it has logged since power-up. A steady value is reassuring; a jump means something
+  tripped even if the condition has since cleared. `entity_category: diagnostic`.
 
 **`text_sensor:`**
 - **`hold_status`** — the "why" behind `ghost_fake_soc`'s raw "what". Reports a short reason
@@ -354,12 +360,26 @@ queries anything itself for these):
   `"holding - re-armed (data stale)"`. Starts as `"holding - waiting for pack data"` on a
   first-ever boot, or `"released (restored from flash)"` if the saved state from before a reboot
   was already released.
+- **`pack1_protection_flags`** / **`pack2_protection_flags`** — `"none"`, or a comma-separated
+  list of whichever of that pack's own alarm/protection bits are currently set (eg.
+  `"cell OVP, discharge OCP"`). This comes straight from the real BMS and has nothing to do with
+  what the ghost is telling the inverter, so it stays meaningful as a "is my real battery actually
+  okay" check even while the ghost is holding at 0% or forcing 100%. `entity_category: diagnostic`.
 
 **`binary_sensor:`**
 - **`pack1_data_stale`** / **`pack2_data_stale`** — on when that pack hasn't sent a fresh status
   frame within `pack_stale_timeout_seconds`. `entity_category: diagnostic`, so these show up in
   the device's collapsible "Diagnostic" section - a good target for a Home Assistant notification
   if you want to be alerted to a wiring or address problem instead of just watching the log.
+- **`pack1_charge_mos`** / **`pack2_charge_mos`** and **`pack1_discharge_mos`** /
+  **`pack2_discharge_mos`** — on when the real pack's own MOS is currently allowing that direction
+  of current. Off is a normal, expected state on its own (eg. discharge MOS off with nothing
+  drawing current) - cross-check against `protection_active`/`protection_flags` below rather than
+  treating "off" as an alarm by itself. `entity_category: diagnostic`.
+- **`pack1_protection_active`** / **`pack2_protection_active`** — on when that pack is reporting
+  at least one of its own alarm/protection bits (see `protection_flags` above). Independent of
+  `ghost_fake_soc`, so this is a genuine "is something actually wrong with the real battery" check
+  regardless of what the ghost is currently telling the bus. `entity_category: diagnostic`.
 
 **`switch:` + `number:`** — a manual override, deliberately built as a two-step interlock so it
 can't be triggered by accident:
@@ -389,12 +409,31 @@ LiFePO4, address `0x0F`) and cross-checked against
 | SoC | 173 | 1 byte, percent |
 | Remaining capacity | 174–177 | 4 bytes little-endian, mAh |
 | Total capacity | 178–181 | 4 bytes little-endian, mAh |
+| Alarm/protection bits | 166–169 | 4 bytes little-endian, one bit per fault, 1 = active |
+| State of health (SOH) | 190 | 1 byte, percent |
+| Charge MOS | 198 | 1 byte, 0 = off (charge cut off), 1 = on |
+| Discharge MOS | 199 | 1 byte, 0 = off (discharge cut off), 1 = on |
+| Fault count | 266 | 1 byte, rising count = a fault has been logged |
 | Internal payload checksum | 299 | 1 byte, sum of bytes 0–298 mod 256 |
 | Source address (trailer echo) | 300 | 1 byte |
 | Trailer CRC16 | 306–307 | Modbus CRC16 over bytes 300–305 only (not the whole frame) |
 
 The total-pack-voltage field was cross-checked by summing the 16 individual cell voltages — they
 matched to within 1mV on the reference capture, confirming both fields.
+
+The alarm/protection bits, SOH, MOS status and fault-count offsets above were cross-checked
+against a third-party JK 55AA protocol reference
+([Gobel-Battery-HA-Addon](https://github.com/fancyui/Gobel-Battery-HA-Addon/blob/main/JK-BMS-55AA-Protocol_EN.md)),
+which independently documents this project's own already-verified offsets (150/158/162/173)
+identically - that agreement is what gives confidence in the previously-unused ones too. As with
+the rest of this table, these haven't been individually re-verified against a live capture from
+every pack model, so treat a genuinely surprising reading (eg. a fault count that jumps constantly)
+as worth double-checking rather than gospel.
+
+Bit 0-23 of the alarm field are individually named (battery/cell over/under-voltage, over-current,
+over-temperature, etc. - see `decode_protection_flags_()` in `jkbms_ghost_battery.cpp` for the
+full list); any set bit above 23 isn't in the reference doc but is still reported as
+`"other (bit N)"` rather than silently dropped.
 
 Bytes 300–305 are an echo of the query that was sent (address, function, subfunction, frame type,
 `0x00`, `0x01`), and bytes 306–307 are a Modbus CRC16 over just those 6 bytes — a completely
