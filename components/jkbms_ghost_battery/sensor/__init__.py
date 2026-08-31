@@ -146,6 +146,22 @@ SENSORS = [
     ("pack2_fault_count", "set_pack2_fault_count_sensor",
      dict(icon="mdi:alert-circle-outline", state_class=STATE_CLASS_TOTAL_INCREASING,
           entity_category=ENTITY_CATEGORY_DIAGNOSTIC)),
+    # full-cycle-equivalent count and cell-balancing current - smaller, deferred extras from the
+    # same offset table as the protection/health sensors above
+    ("pack1_cycle_count", "set_pack1_cycle_count_sensor",
+     dict(icon="mdi:battery-sync-outline", state_class=STATE_CLASS_TOTAL_INCREASING,
+          entity_category=ENTITY_CATEGORY_DIAGNOSTIC)),
+    ("pack2_cycle_count", "set_pack2_cycle_count_sensor",
+     dict(icon="mdi:battery-sync-outline", state_class=STATE_CLASS_TOTAL_INCREASING,
+          entity_category=ENTITY_CATEGORY_DIAGNOSTIC)),
+    ("pack1_balance_current", "set_pack1_balance_current_sensor",
+     dict(unit_of_measurement=UNIT_AMPERE, accuracy_decimals=3, device_class=DEVICE_CLASS_CURRENT,
+          state_class=STATE_CLASS_MEASUREMENT, icon="mdi:scale-balance",
+          entity_category=ENTITY_CATEGORY_DIAGNOSTIC)),
+    ("pack2_balance_current", "set_pack2_balance_current_sensor",
+     dict(unit_of_measurement=UNIT_AMPERE, accuracy_decimals=3, device_class=DEVICE_CLASS_CURRENT,
+          state_class=STATE_CLASS_MEASUREMENT, icon="mdi:scale-balance",
+          entity_category=ENTITY_CATEGORY_DIAGNOSTIC)),
 ]
 
 # entity_category=diagnostic groups all 32 of these into the device's collapsible "Diagnostic"

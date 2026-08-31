@@ -25,6 +25,9 @@ static const uint8_t FRAME3_RESPONSE[JK_FRAME_SIZE] = {0x55, 0xAA, 0xEB, 0x90, 0
 // versions of this project for how these were reverse engineered / verified
 static const uint16_t SOC_OFFSET = 173;
 static const uint16_t REMAINING_CAPACITY_OFFSET = 174;
+static const uint16_t TOTAL_CAPACITY_OFFSET = 178;  // 4 bytes little-endian, mAh - the pack's
+                                                     // nominal/design capacity, not the "how much
+                                                     // is left right now" REMAINING_CAPACITY_OFFSET
 static const uint16_t CHECKSUM_OFFSET = 299;
 static const uint16_t SOURCE_ADDRESS_OFFSET = 300;
 static const uint16_t CELL_VOLTAGE_OFFSET = 6;
@@ -40,6 +43,9 @@ static const uint16_t TEMPERATURE_OFFSET = 162;    // 2 bytes little-endian sign
 // reads 16, and nominal capacity at raw130 reads 36000, both matching esphome-jk-bms's data[]
 // offsets exactly with no shift needed)
 static const uint16_t RCV_OFFSET = 38;  // "rated/requested charge voltage", 4 bytes little-endian, mV
+static const uint16_t NOMINAL_CAPACITY_OFFSET = 130;  // 4 bytes little-endian, mAh - same field as
+                                                       // frame2's TOTAL_CAPACITY_OFFSET above, just
+                                                       // at frame1's unshifted offset
 
 // protection/health offsets within a 308-byte frame2 status packet - these come from the real
 // BMS's own protection logic, independent of whatever SoC the ghost is currently telling the bus,
@@ -48,7 +54,9 @@ static const uint16_t RCV_OFFSET = 38;  // "rated/requested charge voltage", 4 b
 // a third-party JK 55AA protocol reference exactly), which is what gives confidence in these too.
 static const uint16_t ALARM_BITS_OFFSET = 166;    // 4 bytes little-endian, one bit per fault - see
                                                    // decode_protection_flags_() for the bit list
+static const uint16_t BALANCE_CURRENT_OFFSET = 170; // 2 bytes little-endian signed, mA
 static const uint16_t SOH_OFFSET = 190;           // 1 byte, state of health, 0-100%
+static const uint16_t CYCLE_COUNT_OFFSET = 182;   // 4 bytes little-endian, full-cycle-equivalent count
 static const uint16_t CHARGE_MOS_OFFSET = 198;    // 1 byte, 0 = off (charge cut off), 1 = on
 static const uint16_t DISCHARGE_MOS_OFFSET = 199; // 1 byte, 0 = off (discharge cut off), 1 = on
 static const uint16_t FAULT_COUNT_OFFSET = 266;   // 1 byte, rising count = a fault has been logged
@@ -125,6 +133,7 @@ void JkBmsGhostBattery::setup() {
 void JkBmsGhostBattery::dump_config() {
   ESP_LOGCONFIG(TAG, "JK BMS Ghost Battery:");
   ESP_LOGCONFIG(TAG, "  Ghost address: %u", this->ghost_address_);
+  ESP_LOGCONFIG(TAG, "  Ghost capacity: %u Ah", (unsigned) (this->ghost_capacity_mah_ / 1000));
   ESP_LOGCONFIG(TAG, "  Pack count: %u", this->pack_count_);
   ESP_LOGCONFIG(TAG, "  Pack 1 (master) address: %u", this->pack1_address_);
   if (this->pack_count_ >= 2) ESP_LOGCONFIG(TAG, "  Pack 2 address: %u", this->pack2_address_);
@@ -171,6 +180,10 @@ void JkBmsGhostBattery::dump_config() {
   LOG_SENSOR("  ", "Pack 2 SOH", this->pack2_soh_sensor_);
   LOG_SENSOR("  ", "Pack 1 fault count", this->pack1_fault_count_sensor_);
   LOG_SENSOR("  ", "Pack 2 fault count", this->pack2_fault_count_sensor_);
+  LOG_SENSOR("  ", "Pack 1 cycle count", this->pack1_cycle_count_sensor_);
+  LOG_SENSOR("  ", "Pack 2 cycle count", this->pack2_cycle_count_sensor_);
+  LOG_SENSOR("  ", "Pack 1 balance current", this->pack1_balance_current_sensor_);
+  LOG_SENSOR("  ", "Pack 2 balance current", this->pack2_balance_current_sensor_);
   LOG_TEXT_SENSOR("  ", "Hold status", this->hold_status_text_sensor_);
   LOG_TEXT_SENSOR("  ", "Pack 1 protection flags", this->pack1_protection_flags_text_sensor_);
   LOG_TEXT_SENSOR("  ", "Pack 2 protection flags", this->pack2_protection_flags_text_sensor_);
@@ -233,7 +246,13 @@ bool JkBmsGhostBattery::is_query_for_us_() {
   // a real query is: address, 0x10, 0x16, frame_type, 0x00, 0x01, 2-byte length, data, 2-byte CRC
   if (this->num_bytes_ < 11) return false;
   if (this->buf_[1] != 0x10 || this->buf_[2] != 0x16) return false;
-  if (this->buf_[0] != this->ghost_address_ && this->buf_[0] != 0) return false;
+  // NOTE: this used to also treat address 0x00 as "for us" (leftover from the single-BMS Arduino
+  // origin of this frame handling, where the master BMS is always the only device and its own
+  // address doesn't matter). On this project's RS485 bus that's wrong: address 0 is the real
+  // master pack's own address (pack1_address defaults to 0 - see README's "problem this solves"),
+  // so treating queries to 0 as also being for the ghost meant the ghost answered every single
+  // poll of the real master pack too, colliding on the bus with pack1's own genuine response.
+  if (this->buf_[0] != this->ghost_address_) return false;
 
   uint16_t expected = this->crc16_(this->num_bytes_ - 2);
   uint16_t actual = ((uint16_t) this->buf_[this->num_bytes_ - 1] << 8) | this->buf_[this->num_bytes_ - 2];
@@ -256,6 +275,19 @@ void JkBmsGhostBattery::send_frame1_() {
   // it to whatever ghost_address is actually configured (and its trailer CRC) so the frame is
   // internally consistent - see patch_source_address_()
   this->patch_source_address_();
+
+  // the template hardcodes the reference battery's own 36Ah nominal capacity here; patch it to
+  // whatever ghost_capacity_ah is actually configured, so anyone with a different-sized bank
+  // doesn't have the wrong capacity reported to their inverter
+  this->buf_[NOMINAL_CAPACITY_OFFSET + 0] = (uint8_t) (this->ghost_capacity_mah_ & 0xFF);
+  this->buf_[NOMINAL_CAPACITY_OFFSET + 1] = (uint8_t) ((this->ghost_capacity_mah_ >> 8) & 0xFF);
+  this->buf_[NOMINAL_CAPACITY_OFFSET + 2] = (uint8_t) ((this->ghost_capacity_mah_ >> 16) & 0xFF);
+  this->buf_[NOMINAL_CAPACITY_OFFSET + 3] = (uint8_t) ((this->ghost_capacity_mah_ >> 24) & 0xFF);
+  // capacity field above is inside the checksummed range (CHECKSUM_OFFSET covers bytes 0-298),
+  // unlike the source address patched above - recompute it or a master that validates response
+  // checksums will reject this frame, the same class of bug the trailer-CRC fix addressed
+  this->recompute_checksum_();
+
   this->send_response_(JK_FRAME_SIZE);
 }
 
@@ -276,18 +308,24 @@ void JkBmsGhostBattery::send_frame2_() {
   // substitute its own forced value here instead of the automatic evaluation.
   bool holding_now = this->is_holding_();
   if (holding_now) {
-    this->buf_[SOC_OFFSET] = 0;
     this->buf_[REMAINING_CAPACITY_OFFSET + 0] = 0x00;
     this->buf_[REMAINING_CAPACITY_OFFSET + 1] = 0x00;
     this->buf_[REMAINING_CAPACITY_OFFSET + 2] = 0x00;
     this->buf_[REMAINING_CAPACITY_OFFSET + 3] = 0x00;
   } else {
-    this->buf_[SOC_OFFSET] = 100;
-    this->buf_[REMAINING_CAPACITY_OFFSET + 0] = 0xA0;  // 36 Ah (36000 mAh, little-endian)
-    this->buf_[REMAINING_CAPACITY_OFFSET + 1] = 0x8C;
-    this->buf_[REMAINING_CAPACITY_OFFSET + 2] = 0x00;
-    this->buf_[REMAINING_CAPACITY_OFFSET + 3] = 0x00;
+    this->buf_[REMAINING_CAPACITY_OFFSET + 0] = (uint8_t) (this->ghost_capacity_mah_ & 0xFF);
+    this->buf_[REMAINING_CAPACITY_OFFSET + 1] = (uint8_t) ((this->ghost_capacity_mah_ >> 8) & 0xFF);
+    this->buf_[REMAINING_CAPACITY_OFFSET + 2] = (uint8_t) ((this->ghost_capacity_mah_ >> 16) & 0xFF);
+    this->buf_[REMAINING_CAPACITY_OFFSET + 3] = (uint8_t) ((this->ghost_capacity_mah_ >> 24) & 0xFF);
   }
+  // reports whatever ghost_capacity_ah is configured, whether holding or released - this is the
+  // pack's nominal/design capacity (a fixed spec), not the "how much is left" field patched above
+  this->buf_[TOTAL_CAPACITY_OFFSET + 0] = (uint8_t) (this->ghost_capacity_mah_ & 0xFF);
+  this->buf_[TOTAL_CAPACITY_OFFSET + 1] = (uint8_t) ((this->ghost_capacity_mah_ >> 8) & 0xFF);
+  this->buf_[TOTAL_CAPACITY_OFFSET + 2] = (uint8_t) ((this->ghost_capacity_mah_ >> 16) & 0xFF);
+  this->buf_[TOTAL_CAPACITY_OFFSET + 3] = (uint8_t) ((this->ghost_capacity_mah_ >> 24) & 0xFF);
+
+  this->buf_[SOC_OFFSET] = holding_now ? 0 : 100;
   if (this->ghost_fake_soc_sensor_ != nullptr) this->ghost_fake_soc_sensor_->publish_state(holding_now ? 0 : 100);
 
   // report the average of both real packs' temperature instead of the static ~27.5C baked into
@@ -310,11 +348,9 @@ void JkBmsGhostBattery::send_frame2_() {
     this->buf_[TEMPERATURE_OFFSET + 1] = (uint8_t) ((temp_c10 >> 8) & 0xFF);
   }
 
-  // recompute the JK payload checksum (simple byte sum over bytes 0-298) since the SoC/capacity
-  // fields above were just modified
-  uint16_t sum = 0;
-  for (uint16_t i = 0; i < CHECKSUM_OFFSET; i++) sum += this->buf_[i];
-  this->buf_[CHECKSUM_OFFSET] = (uint8_t) (sum & 0xFF);
+  // recompute the JK payload checksum since the SoC/capacity/temperature fields above were just
+  // modified
+  this->recompute_checksum_();
 
   this->send_response_(JK_FRAME_SIZE);
 }
@@ -390,6 +426,11 @@ void JkBmsGhostBattery::sniff_real_pack_() {
   bool charge_mos_on = this->buf_[CHARGE_MOS_OFFSET] != 0;
   bool discharge_mos_on = this->buf_[DISCHARGE_MOS_OFFSET] != 0;
   uint8_t fault_count = this->buf_[FAULT_COUNT_OFFSET];
+  uint32_t cycle_count = this->buf_[CYCLE_COUNT_OFFSET] | ((uint32_t) this->buf_[CYCLE_COUNT_OFFSET + 1] << 8) |
+                         ((uint32_t) this->buf_[CYCLE_COUNT_OFFSET + 2] << 16) |
+                         ((uint32_t) this->buf_[CYCLE_COUNT_OFFSET + 3] << 24);
+  int16_t balance_current_ma =
+      (int16_t) (this->buf_[BALANCE_CURRENT_OFFSET] | ((uint16_t) this->buf_[BALANCE_CURRENT_OFFSET + 1] << 8));
 
   if (source_address == this->pack1_address_) {
     this->pack1_min_mv_ = min_mv;
@@ -398,6 +439,7 @@ void JkBmsGhostBattery::sniff_real_pack_() {
     this->pack1_voltage_mv_ = voltage_mv;
     this->pack1_current_ma_ = current_ma;
     this->pack1_temperature_c10_ = temperature_c10;
+    this->pack1_charge_mos_on_ = charge_mos_on;
     this->pack1_seen_ = true;
     this->pack1_last_update_ms_ = millis();
     if (this->pack1_min_cell_voltage_sensor_ != nullptr) this->pack1_min_cell_voltage_sensor_->publish_state(min_mv / 1000.0f);
@@ -420,6 +462,8 @@ void JkBmsGhostBattery::sniff_real_pack_() {
       this->pack1_protection_flags_text_sensor_->publish_state(decode_protection_flags_(alarm_bits));
     if (this->pack1_soh_sensor_ != nullptr) this->pack1_soh_sensor_->publish_state(soh);
     if (this->pack1_fault_count_sensor_ != nullptr) this->pack1_fault_count_sensor_->publish_state(fault_count);
+    if (this->pack1_cycle_count_sensor_ != nullptr) this->pack1_cycle_count_sensor_->publish_state(cycle_count);
+    if (this->pack1_balance_current_sensor_ != nullptr) this->pack1_balance_current_sensor_->publish_state(balance_current_ma / 1000.0f);
   } else {
     this->pack2_min_mv_ = min_mv;
     this->pack2_max_mv_ = max_mv;
@@ -427,6 +471,7 @@ void JkBmsGhostBattery::sniff_real_pack_() {
     this->pack2_voltage_mv_ = voltage_mv;
     this->pack2_current_ma_ = current_ma;
     this->pack2_temperature_c10_ = temperature_c10;
+    this->pack2_charge_mos_on_ = charge_mos_on;
     this->pack2_seen_ = true;
     this->pack2_last_update_ms_ = millis();
     if (this->pack2_min_cell_voltage_sensor_ != nullptr) this->pack2_min_cell_voltage_sensor_->publish_state(min_mv / 1000.0f);
@@ -449,6 +494,8 @@ void JkBmsGhostBattery::sniff_real_pack_() {
       this->pack2_protection_flags_text_sensor_->publish_state(decode_protection_flags_(alarm_bits));
     if (this->pack2_soh_sensor_ != nullptr) this->pack2_soh_sensor_->publish_state(soh);
     if (this->pack2_fault_count_sensor_ != nullptr) this->pack2_fault_count_sensor_->publish_state(fault_count);
+    if (this->pack2_cycle_count_sensor_ != nullptr) this->pack2_cycle_count_sensor_->publish_state(cycle_count);
+    if (this->pack2_balance_current_sensor_ != nullptr) this->pack2_balance_current_sensor_->publish_state(balance_current_ma / 1000.0f);
   }
 
   // in single-pack mode, the "average" is just pack1's own value
@@ -555,12 +602,32 @@ void JkBmsGhostBattery::evaluate_hold_() {
                     (pack2_fresh && pack2_temp_ok && this->pack2_min_mv_ >= this->cell_full_low_mv_ &&
                      (this->pack2_max_mv_ - this->pack2_min_mv_) <= this->cell_balance_tolerance_mv_);
 
+    // if the real pack's own charge MOS is already off, it cannot accept any more charge current
+    // right now regardless of why (cell OVP, over-temp, whatever tripped it) - holding at 0% just
+    // to chase a "confirmed full and balanced" release that can't happen without current flowing
+    // serves no purpose, and the inverter should be told to stop trying. This deliberately only
+    // looks at charge_mos (a single, unambiguous "can it charge" answer the real BMS has already
+    // computed for us), not the full protection_active/protection_flags bitfield - those cover
+    // faults (eg. discharge OCP, GPS disconnected) that have nothing to do with this decision, and
+    // hand-parsing 24 loosely-documented bits into "should release" vs "should not" isn't worth
+    // the risk of getting a safety-relevant call wrong. protection_active/protection_flags stay
+    // informational-only, visible in Home Assistant for you to act on.
+    bool pack1_charge_blocked = pack1_fresh && !this->pack1_charge_mos_on_;
+    bool pack2_charge_blocked = this->pack_count_ >= 2 && pack2_fresh && !this->pack2_charge_mos_on_;
+
     if (pack1_ok && pack2_ok) {
       this->holding_ = false;
       this->hold_state_pref_.save(&this->holding_);
       ESP_LOGI(TAG, "Pack(s) balanced (<=%u mV spread) and full (>=%u mV) - releasing ghost SoC to 100%%",
                this->cell_balance_tolerance_mv_, this->cell_full_low_mv_);
       this->publish_hold_status_("released - balanced and full");
+    } else if (pack1_charge_blocked || pack2_charge_blocked) {
+      this->holding_ = false;
+      this->hold_state_pref_.save(&this->holding_);
+      ESP_LOGW(TAG, "Pack %s charge MOS is off (real BMS has cut off charging) - releasing ghost SoC to 100%% "
+                     "since it can't charge further regardless of what the ghost reports",
+               pack1_charge_blocked && pack2_charge_blocked ? "1 and 2" : (pack1_charge_blocked ? "1" : "2"));
+      this->publish_hold_status_("released - pack charge MOS off (charging blocked by real BMS)");
     } else if (this->hold_failsafe_ms_ > 0 && (now - this->hold_start_time_) >= this->hold_failsafe_ms_) {
       this->holding_ = false;
       this->hold_state_pref_.save(&this->holding_);
@@ -613,6 +680,16 @@ void JkBmsGhostBattery::patch_source_address_() {
   }
   this->buf_[JK_FRAME_SIZE - 2] = (uint8_t) (value & 0xFF);
   this->buf_[JK_FRAME_SIZE - 1] = (uint8_t) ((value >> 8) & 0xFF);
+}
+
+void JkBmsGhostBattery::recompute_checksum_() {
+  // the JK payload checksum is just a plain byte sum over bytes 0-298 mod 256 - much simpler than
+  // the trailer's Modbus CRC16 above, but just as easy to forget after patching a byte inside that
+  // range (SoC, capacity, temperature, ...). CHECKSUM_OFFSET (299) does NOT cover the trailer
+  // patch_source_address_() touches, so the two never need recomputing together.
+  uint16_t sum = 0;
+  for (uint16_t i = 0; i < CHECKSUM_OFFSET; i++) sum += this->buf_[i];
+  this->buf_[CHECKSUM_OFFSET] = (uint8_t) (sum & 0xFF);
 }
 
 uint16_t JkBmsGhostBattery::crc16_(uint16_t len) {

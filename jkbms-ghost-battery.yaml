@@ -56,6 +56,8 @@ jkbms_ghost_battery:
   # and wire it to the tied-together DE+RE pins:
   # de_pin: GPIO4
   ghost_address: 15      # RS485 address to spoof - must have no physical battery here
+  ghost_capacity_ah: 36  # reported nominal/remaining capacity once released - match your real
+                          # bank's actual capacity, not the reference battery's own 36Ah
   pack_count: 2          # 1 or 2 - set to 1 if you only have a single real pack (pack2_address
                           # below is then ignored entirely, no need to remove it)
   pack1_address: 0       # real pack 1 / master BMS RS485 address - verify your dip switch setting
@@ -145,6 +147,14 @@ sensor:
       name: "Pack 1 fault count"   # rising count = pack 1 has logged a fault since power-up
     pack2_fault_count:
       name: "Pack 2 fault count"
+    pack1_cycle_count:
+      name: "Pack 1 cycle count"
+    pack2_cycle_count:
+      name: "Pack 2 cycle count"
+    pack1_balance_current:
+      name: "Pack 1 balance current"   # current being shunted between cells to balance them
+    pack2_balance_current:
+      name: "Pack 2 balance current"
     # individual cell voltages - all 32 optional, add/remove any you don't want
     pack1_cell_1:
       name: "Pack 1 Cell 1"

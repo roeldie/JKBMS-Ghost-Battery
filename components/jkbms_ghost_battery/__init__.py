@@ -16,6 +16,7 @@ CONF_JKBMS_GHOST_BATTERY_ID = "jkbms_ghost_battery_id"
 
 CONF_DE_PIN = "de_pin"
 CONF_GHOST_ADDRESS = "ghost_address"
+CONF_GHOST_CAPACITY_AH = "ghost_capacity_ah"
 CONF_PACK_COUNT = "pack_count"
 CONF_PACK1_ADDRESS = "pack1_address"
 CONF_PACK2_ADDRESS = "pack2_address"
@@ -56,6 +57,9 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(JkBmsGhostBattery),
             cv.Optional(CONF_DE_PIN): pins.gpio_output_pin_schema,
             cv.Optional(CONF_GHOST_ADDRESS, default=15): cv.int_range(min=1, max=247),
+            # nominal/remaining capacity the ghost reports once released - match your real bank's
+            # actual capacity instead of the reference battery's own 36Ah
+            cv.Optional(CONF_GHOST_CAPACITY_AH, default=36): cv.int_range(min=1, max=2000),
             # 1 or 2 real packs. In single-pack mode, pack2_address below is ignored entirely -
             # the release/re-arm logic and the average sensors all work off pack1 alone.
             cv.Optional(CONF_PACK_COUNT, default=2): cv.one_of(1, 2, int=True),
@@ -100,6 +104,7 @@ async def to_code(config):
         cg.add(var.set_de_pin(de_pin))
 
     cg.add(var.set_ghost_address(config[CONF_GHOST_ADDRESS]))
+    cg.add(var.set_ghost_capacity_ah(config[CONF_GHOST_CAPACITY_AH]))
     cg.add(var.set_pack_count(config[CONF_PACK_COUNT]))
     cg.add(var.set_pack1_address(config[CONF_PACK1_ADDRESS]))
     cg.add(var.set_pack2_address(config[CONF_PACK2_ADDRESS]))

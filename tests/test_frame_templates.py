@@ -20,7 +20,10 @@ CELL_COUNT = 16
 TOTAL_VOLTAGE_OFFSET = 150
 CURRENT_OFFSET = 158
 TEMPERATURE_OFFSET = 162
+TOTAL_CAPACITY_OFFSET = 178  # frame2's unshifted layout
+NOMINAL_CAPACITY_OFFSET = 130  # frame1's unshifted layout - same field, different frame
 DEFAULT_GHOST_ADDRESS = 15  # matches CONF_GHOST_ADDRESS's default in components/jkbms_ghost_battery/__init__.py
+DEFAULT_GHOST_CAPACITY_MAH = 36000  # matches CONF_GHOST_CAPACITY_AH's default (36) in __init__.py
 
 
 def _load_template(name):
@@ -83,3 +86,15 @@ def test_frame2_current_and_temperature_are_plausible():
 
     assert current_ma == 0
     assert 20 * 10 <= temperature_c10 <= 35 * 10  # sanity range, not a tight assertion
+
+
+def test_capacity_offsets_match_default_ghost_capacity():
+    # send_frame1_()/send_frame2_() patch these to whatever ghost_capacity_ah is configured (see
+    # set_ghost_capacity_ah()); the raw, unpatched templates should still read the reference
+    # battery's own 36Ah, which is also this component's default ghost_capacity_ah - so a
+    # default-config ghost patches these fields to the exact value already baked into the
+    # template (a no-op in practice, same as the source-address patch at the default ghost_address)
+    frame1 = _load_template("FRAME1_RESPONSE")
+    frame2 = _load_template("FRAME2_RESPONSE")
+    assert _u32le(frame1, NOMINAL_CAPACITY_OFFSET) == DEFAULT_GHOST_CAPACITY_MAH
+    assert _u32le(frame2, TOTAL_CAPACITY_OFFSET) == DEFAULT_GHOST_CAPACITY_MAH

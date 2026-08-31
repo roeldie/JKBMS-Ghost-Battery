@@ -26,6 +26,9 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
 
   void set_de_pin(GPIOPin *pin) { this->de_pin_ = pin; }
   void set_ghost_address(uint8_t address) { this->ghost_address_ = address; }
+  // reported nominal/remaining capacity when released, in Ah - matches whatever the real bank
+  // actually is instead of the reference battery's own hardcoded 36Ah
+  void set_ghost_capacity_ah(uint16_t ah) { this->ghost_capacity_mah_ = (uint32_t) ah * 1000; }
   // 1 or 2. In single-pack mode, pack2_address_/pack2_* is ignored entirely everywhere - the
   // release/re-arm logic, the average sensors and the temperature fallback all work off pack1 alone.
   void set_pack_count(uint8_t count) { this->pack_count_ = count; }
@@ -113,6 +116,12 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   // jump means something tripped even if the condition has since cleared
   void set_pack1_fault_count_sensor(sensor::Sensor *s) { this->pack1_fault_count_sensor_ = s; }
   void set_pack2_fault_count_sensor(sensor::Sensor *s) { this->pack2_fault_count_sensor_ = s; }
+  // full-cycle-equivalent count and current balancing between cells within a pack (mA) - smaller,
+  // deferred extras from the same protection/health offset table above
+  void set_pack1_cycle_count_sensor(sensor::Sensor *s) { this->pack1_cycle_count_sensor_ = s; }
+  void set_pack2_cycle_count_sensor(sensor::Sensor *s) { this->pack2_cycle_count_sensor_ = s; }
+  void set_pack1_balance_current_sensor(sensor::Sensor *s) { this->pack1_balance_current_sensor_ = s; }
+  void set_pack2_balance_current_sensor(sensor::Sensor *s) { this->pack2_balance_current_sensor_ = s; }
 
   // individual cell voltages, index 0-15 (cell 1-16)
   void set_pack1_cell_voltage_sensor(uint8_t index, sensor::Sensor *s) { this->pack1_cell_sensors_[index] = s; }
@@ -138,9 +147,12 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   bool is_holding_() { return this->manual_override_armed_ ? (this->manual_force_soc_ < 50) : this->holding_; }
   uint16_t crc16_(uint16_t len);
   void patch_source_address_();
+  void recompute_checksum_();
 
   GPIOPin *de_pin_{nullptr};
   uint8_t ghost_address_{15};
+  // matches the YAML schema's own default (36 Ah) - see set_ghost_capacity_ah()
+  uint32_t ghost_capacity_mah_{36000};
   uint8_t pack_count_{2};
   uint8_t pack1_address_{0};
   uint8_t pack2_address_{1};
@@ -198,6 +210,11 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   int32_t pack1_current_ma_{0}, pack2_current_ma_{0};
   int16_t pack1_temperature_c10_{0}, pack2_temperature_c10_{0};
   uint32_t pack1_rcv_voltage_mv_{0}, pack2_rcv_voltage_mv_{0};
+  // last-seen charge MOS state from each pack's own status frame - fed into evaluate_hold_() so
+  // an actual charge cutoff on the real BMS can force an immediate release (see evaluate_hold_()
+  // for why only charge_mos, not the full alarm bitfield, is used for this). Default true so a
+  // pack that hasn't reported yet (pack1_seen_/pack2_seen_ false) can't spuriously block anything.
+  bool pack1_charge_mos_on_{true}, pack2_charge_mos_on_{true};
   uint16_t pack1_cell_mv_[16]{};
   uint16_t pack2_cell_mv_[16]{};
 
@@ -233,6 +250,10 @@ class JkBmsGhostBattery : public Component, public uart::UARTDevice {
   sensor::Sensor *pack2_soh_sensor_{nullptr};
   sensor::Sensor *pack1_fault_count_sensor_{nullptr};
   sensor::Sensor *pack2_fault_count_sensor_{nullptr};
+  sensor::Sensor *pack1_cycle_count_sensor_{nullptr};
+  sensor::Sensor *pack2_cycle_count_sensor_{nullptr};
+  sensor::Sensor *pack1_balance_current_sensor_{nullptr};
+  sensor::Sensor *pack2_balance_current_sensor_{nullptr};
   sensor::Sensor *pack1_cell_sensors_[16]{};
   sensor::Sensor *pack2_cell_sensors_[16]{};
 

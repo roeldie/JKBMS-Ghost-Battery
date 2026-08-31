@@ -34,25 +34,31 @@ class HoldStateMachine:
     pack2_soc: int = 0
     pack1_temperature_c10: int = 0
     pack2_temperature_c10: int = 0
+    # default True so existing callers that don't care about MOS state keep passing unchanged -
+    # matches the component's own pack1_charge_mos_on_/pack2_charge_mos_on_ defaults
+    pack1_charge_mos_on: bool = True
+    pack2_charge_mos_on: bool = True
 
-    # temp_c10 defaults to a comfortably cool 25.0 C so existing callers that don't care about
-    # temperature keep passing without changes
-    def see_pack1(self, now, min_mv, max_mv, soc, temp_c10=250):
+    # temp_c10/charge_mos_on default to "nothing wrong" (cool, charging allowed) so existing
+    # callers that don't care about them keep passing without changes
+    def see_pack1(self, now, min_mv, max_mv, soc, temp_c10=250, charge_mos_on=True):
         self.pack1_seen = True
         self.pack1_last_update_ms = now
         self.pack1_min_mv = min_mv
         self.pack1_max_mv = max_mv
         self.pack1_soc = soc
         self.pack1_temperature_c10 = temp_c10
+        self.pack1_charge_mos_on = charge_mos_on
         self.evaluate(now)
 
-    def see_pack2(self, now, min_mv, max_mv, soc, temp_c10=250):
+    def see_pack2(self, now, min_mv, max_mv, soc, temp_c10=250, charge_mos_on=True):
         self.pack2_seen = True
         self.pack2_last_update_ms = now
         self.pack2_min_mv = min_mv
         self.pack2_max_mv = max_mv
         self.pack2_soc = soc
         self.pack2_temperature_c10 = temp_c10
+        self.pack2_charge_mos_on = charge_mos_on
         self.evaluate(now)
 
     def evaluate(self, now):
@@ -81,7 +87,15 @@ class HoldStateMachine:
                 and (self.pack2_max_mv - self.pack2_min_mv) <= self.cell_balance_tolerance_mv
             )
 
+            # if the real pack's own charge MOS is off, it can't accept more charge current right
+            # now regardless of why - holding at 0% to chase a "confirmed full and balanced"
+            # release that can't happen without current flowing serves no purpose
+            pack1_charge_blocked = pack1_fresh and not self.pack1_charge_mos_on
+            pack2_charge_blocked = self.pack_count >= 2 and pack2_fresh and not self.pack2_charge_mos_on
+
             if pack1_ok and pack2_ok:
+                self.holding = False
+            elif pack1_charge_blocked or pack2_charge_blocked:
                 self.holding = False
             elif self.hold_failsafe_ms > 0 and (now - self.hold_start_time) >= self.hold_failsafe_ms:
                 self.holding = False
@@ -195,3 +209,41 @@ def test_temp_check_disabled_when_zero():
     # would block release above with the check enabled (see test_hot_pack_blocks_release)
     sm.see_pack1(now=1000, min_mv=FULL_MIN_MV, max_mv=FULL_MAX_MV, soc=100, temp_c10=550)
     assert sm.holding is False
+
+
+def test_charge_mos_off_forces_release_even_when_not_full_or_balanced():
+    sm = HoldStateMachine(pack_count=1)
+    # nowhere near full/balanced, but the real pack has cut off charging itself - holding
+    # serves no purpose since no current can flow regardless of what the ghost reports
+    sm.see_pack1(now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=False)
+    assert sm.holding is False
+
+
+def test_charge_mos_on_does_not_release_by_itself():
+    sm = HoldStateMachine(pack_count=1)
+    # charge_mos_on=True (the default) alongside an out-of-balance pack must NOT release -
+    # only an actual MOS cutoff (or full+balanced, or the failsafe) does
+    sm.see_pack1(now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=True)
+    assert sm.holding is True
+
+
+def test_two_pack_mode_either_packs_charge_mos_off_forces_release():
+    sm = HoldStateMachine(pack_count=2)
+    sm.see_pack1(now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=True)
+    assert sm.holding is True
+    sm.see_pack2(now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=False)
+    assert sm.holding is False
+
+
+def test_charge_mos_off_on_stale_pack_does_not_force_release():
+    # a pack that's gone stale is never trusted for anything, including its last-known MOS state -
+    # otherwise a disconnected/reset pack's final cached reading could force a release forever
+    sm = HoldStateMachine(pack_count=1, pack_stale_timeout_ms=30000)
+    sm.pack1_seen = True
+    sm.pack1_last_update_ms = 0
+    sm.pack1_min_mv = 3000
+    sm.pack1_max_mv = 3000
+    sm.pack1_soc = 50
+    sm.pack1_charge_mos_on = False
+    sm.evaluate(now=30001)
+    assert sm.holding is True
