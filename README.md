@@ -145,6 +145,28 @@ into the module, and RX to whichever pin comes out of it.
 Using an old-style MAX485 module instead? Add a `GPIO4 → DE + RE (tied together)` connection and
 set `de_pin: GPIO4` in the YAML (see [Configuration reference](#configuration-reference)).
 
+Some other modules (eg. Waveshare's RS485 boards) also need active direction control like this —
+without it, they simply never transmit — but don't behave well with `de_pin` above, which toggles
+the pin in software around each response. If that's the case, try ESPHome's own UART-level
+`flow_control_pin` instead, set directly on the `uart:` block (and leave `de_pin` unset in the
+`jkbms_ghost_battery:` block):
+
+```yaml
+uart:
+  id: jkbms_uart
+  tx_pin: GPIO17
+  rx_pin: GPIO18
+  flow_control_pin: GPIO21
+  baud_rate: 115200
+  data_bits: 8
+  parity: NONE
+  stop_bits: 1
+```
+
+This is a different mechanism from `de_pin`: the UART driver itself toggles the pin, timed to
+each byte in hardware, rather than this component switching it in software before/after sending -
+worth trying if a module needs direction control and `de_pin` isn't reliable for it.
+
 The Cat5 cable's other end is a standard, unmodified RJ45 plug into the BMS's RS485 port — same
 connector the JK Windows tool or Solar Assistant would use.
 
@@ -180,6 +202,48 @@ multimeter for continuity checks, and a lighter/heat gun for the heat-shrink.
 5. **Check before powering on.** With everything unpowered, use a multimeter in continuity mode
    to confirm: `A` and `B` aren't shorted to each other or to `GND`, and there's no continuity
    between your 5V/VCC wire and `GND`. Then power up and plug the RJ45 end into the BMS.
+
+### Not seeing the ghost battery, or a pack dropping out?
+
+If a pack (or the ghost itself) doesn't show up at all, or intermittently drops off the bus, even
+though wiring and `pack_addresses` both check out, the cause is often signal interference on the
+cable itself rather than anything in the config. This isn't a "long cable" problem specifically —
+it's been seen on runs as short as ~30cm just as much as on a 20m run, and it has nothing to do
+with how many packs you have; it can happen with a single pack just as easily as with several.
+It's also not reliably fixed by adding another termination resistor: each JK BMS already carries
+its own internal 120Ω termination, so with more than one pack on the bus you already have multiple
+of those in parallel (eg. ~60Ω total with two) — adding a third resistor at the adapter end only
+pushes that further from the ~120Ω target instead of closer to it.
+
+A community-reported fix that resolved exactly this (tested from ~30cm up to a 20m run). The key
+material requirement is a **shielded (FTP) cable** instead of plain unshielded Cat5 — the fix
+depends on that foil/drain shield being present at all:
+
+1. Use an **FTP (foiled twisted pair) cable**, and only use its differential pair (A/B) plus one
+   extra core for a signal ground, alongside the cable's own foil shield/drain wire. Exact core
+   colors vary by cable brand — go by position/function (pair vs. ground vs. drain), not by the
+   colors in the photos below, which won't necessarily match what you're holding.
+2. At the **battery/pack end**, connect only the pair (A/B) and the ground core — leave the
+   cable's foil shield/drain wire disconnected here.
+3. At the **RS485 adapter end**, twist the shield/drain wire together with the ground core and
+   the minus (`-`) of the adapter's own power supply, and cover with heat-shrink.
+
+| Shield + ground twisted together at the adapter end | Pack-side RJ45 plug |
+|---|---|
+| ![Shielded cable prepped at the adapter end, shield/drain and ground core twisted together before heat-shrinking](images/shielded-cable-prep.jpeg) | ![RJ45 plug wired for the battery/pack end](images/shielded-cable-rj45.jpeg) |
+
+The key detail is grounding the shield at only **one** end (the adapter side), not both — grounded
+at both ends it forms a ground loop that made the problem worse; left fully floating, it gave no
+shielding at all and only worked up to ~2m. Single-point shield grounding gives both: no ground
+loop, and real shielding against the interference between the packs' own bus traffic — which is
+the actual cause of the reflections here, since adding proper termination at the adapter isn't an
+option (already ~60Ω from the packs' own built-in resistors).
+
+As an aside from the same report: a module driving a stronger RS485 signal (measured ~7-8V vs.
+~3-4.6V from a basic TTL-to-RS485 chip driven straight off an ESP32's 3.3V/5V) was noticeably more
+reliable on the same cable — closer to the signal level the JK BMS's own transceivers use.
+Anecdotal, not independently verified here, but worth knowing if you're choosing between modules
+and still seeing dropouts after the shielding fix above.
 
 ## Installation
 
