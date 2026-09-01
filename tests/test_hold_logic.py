@@ -74,7 +74,7 @@ class HoldStateMachine:
 
         if self.holding:
             all_ok = True
-            any_charge_blocked = False
+            all_charge_mos_off = True
             for i in range(self.pack_count):
                 temp_ok = (
                     self.cell_full_max_temp_c == 0 or self.pack_temperature_c10[i] <= self.cell_full_max_temp_c * 10
@@ -88,15 +88,16 @@ class HoldStateMachine:
                 if not pack_ok:
                     all_ok = False
 
-                # if a real pack's own charge MOS is already off, it can't accept more charge
-                # current right now regardless of why - holding at 0% to chase a "confirmed full
-                # and balanced" release that can't happen without current flowing serves no purpose
-                if fresh[i] and not self.pack_charge_mos_on[i]:
-                    any_charge_blocked = True
+                # only if EVERY configured pack's own charge MOS is off can none of them accept
+                # more current - one pack finishing early must not force an array-wide release
+                # while the others are still mid-charge and need the time to actually balance
+                charge_mos_off = fresh[i] and not self.pack_charge_mos_on[i]
+                if not charge_mos_off:
+                    all_charge_mos_off = False
 
             if all_ok:
                 self.holding = False
-            elif any_charge_blocked:
+            elif all_charge_mos_off:
                 self.holding = False
             elif self.hold_failsafe_ms > 0 and (now - self.hold_start_time) >= self.hold_failsafe_ms:
                 self.holding = False
@@ -239,21 +240,38 @@ def test_charge_mos_on_does_not_release_by_itself():
     assert sm.holding is True
 
 
-def test_two_pack_mode_either_packs_charge_mos_off_forces_release():
+def test_two_pack_mode_one_pack_charge_mos_off_does_not_release():
+    # one pack finishing (its own BMS cuts charging) while the other is still mid-charge must NOT
+    # force an array-wide release - the other pack still needs the time at voltage to balance
     sm = HoldStateMachine(pack_count=2)
     sm.see_pack(0, now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=True)
+    sm.see_pack(1, now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=False)
     assert sm.holding is True
+
+
+def test_two_pack_mode_both_packs_charge_mos_off_forces_release():
+    sm = HoldStateMachine(pack_count=2)
+    sm.see_pack(0, now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=False)
+    assert sm.holding is True, "pack 2 hasn't reported its MOS state as off yet"
     sm.see_pack(1, now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=False)
     assert sm.holding is False
 
 
-def test_three_pack_mode_any_single_pack_charge_mos_off_forces_release():
-    # generalization check: with more than 2 packs, only ONE of them needs its charge MOS off to
-    # force a release - it doesn't scale up to "all packs" or "a majority"
+def test_three_pack_mode_all_but_one_charge_mos_off_does_not_release():
+    # generalization check: with more than 2 packs, EVERY one of them needs its charge MOS off -
+    # a single pack still mid-charge is enough to keep holding, no matter how many others are done
     sm = HoldStateMachine(pack_count=3)
-    sm.see_pack(0, now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=True)
-    sm.see_pack(1, now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=True)
+    sm.see_pack(0, now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=False)
+    sm.see_pack(1, now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=False)
+    sm.see_pack(2, now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=True)
     assert sm.holding is True
+
+
+def test_three_pack_mode_all_packs_charge_mos_off_forces_release():
+    sm = HoldStateMachine(pack_count=3)
+    sm.see_pack(0, now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=False)
+    sm.see_pack(1, now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=False)
+    assert sm.holding is True, "pack 3 hasn't reported its MOS state as off yet"
     sm.see_pack(2, now=1000, min_mv=3000, max_mv=3000, soc=50, charge_mos_on=False)
     assert sm.holding is False
 

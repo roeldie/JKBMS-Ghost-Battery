@@ -565,30 +565,34 @@ void JkBmsGhostBattery::evaluate_hold_() {
     // cell_full_max_temp_c_ == 0 means the check is disabled; otherwise a pack that's too hot
     // blocks release even if it's otherwise full and balanced - see set_cell_full_max_temp_c()
     bool all_ok = true;
-    bool any_charge_blocked = false;
-    std::string blocked_packs;
+    bool all_charge_mos_off = true;
+    std::string mos_off_packs;
     for (uint8_t i = 0; i < this->pack_count_; i++) {
       bool temp_ok = this->cell_full_max_temp_c_ == 0 || this->pack_temperature_c10_[i] <= this->cell_full_max_temp_c_ * 10;
       bool pack_ok = fresh[i] && temp_ok && this->pack_min_mv_[i] >= this->cell_full_low_mv_ &&
                      (this->pack_max_mv_[i] - this->pack_min_mv_[i]) <= this->cell_balance_tolerance_mv_;
       if (!pack_ok) all_ok = false;
 
-      // if a real pack's own charge MOS is already off, it cannot accept any more charge current
-      // right now regardless of why (cell OVP, over-temp, whatever tripped it) - holding at 0%
-      // just to chase a "confirmed full and balanced" release that can't happen without current
-      // flowing serves no purpose, and the inverter should be told to stop trying. This
-      // deliberately only looks at charge_mos (a single, unambiguous "can it charge" answer the
-      // real BMS has already computed for us), not the full protection_active/protection_flags
-      // bitfield - those cover faults (eg. discharge OCP, GPS disconnected) that have nothing to
-      // do with this decision, and hand-parsing 24 loosely-documented bits into "should release"
-      // vs "should not" isn't worth the risk of getting a safety-relevant call wrong.
-      // protection_active/protection_flags stay informational-only, visible in Home Assistant for
-      // you to act on.
-      bool charge_blocked = fresh[i] && !this->pack_charge_mos_on_[i];
-      if (charge_blocked) {
-        any_charge_blocked = true;
-        if (!blocked_packs.empty()) blocked_packs += ", ";
-        blocked_packs += std::to_string(i + 1);
+      // If EVERY configured pack's own charge MOS is off, none of them can accept any more charge
+      // current right now regardless of why (cell OVP, over-temp, whatever tripped it) - holding
+      // at 0% just to chase a "confirmed full and balanced" release that can't happen without
+      // current flowing serves no purpose, and the inverter should be told to stop trying.
+      // Deliberately requires ALL packs, not just one: the whole point of a multi-pack array is
+      // for every pack to reach a genuine full charge, so one pack finishing early (a normal,
+      // expected event - packs don't all hit their own cutoff at exactly the same moment) must
+      // not force an array-wide release while the others are still mid-charge and need the time
+      // at voltage to actually balance. This only looks at charge_mos (a single, unambiguous
+      // "can it charge" answer the real BMS has already computed for us), not the full
+      // protection_active/protection_flags bitfield - those cover faults (eg. discharge OCP, GPS
+      // disconnected) that have nothing to do with this decision, and hand-parsing 24
+      // loosely-documented bits into "should release" vs "should not" isn't worth the risk of
+      // getting a safety-relevant call wrong. protection_active/protection_flags stay
+      // informational-only, visible in Home Assistant for you to act on.
+      bool charge_mos_off = fresh[i] && !this->pack_charge_mos_on_[i];
+      if (!charge_mos_off) all_charge_mos_off = false;
+      if (charge_mos_off) {
+        if (!mos_off_packs.empty()) mos_off_packs += ", ";
+        mos_off_packs += std::to_string(i + 1);
       }
     }
 
@@ -598,13 +602,14 @@ void JkBmsGhostBattery::evaluate_hold_() {
       ESP_LOGI(TAG, "Pack(s) balanced (<=%u mV spread) and full (>=%u mV) - releasing ghost SoC to 100%%",
                this->cell_balance_tolerance_mv_, this->cell_full_low_mv_);
       this->publish_hold_status_("released - balanced and full");
-    } else if (any_charge_blocked) {
+    } else if (all_charge_mos_off) {
       this->holding_ = false;
       this->hold_state_pref_.save(&this->holding_);
-      ESP_LOGW(TAG, "Pack(s) %s charge MOS off (real BMS has cut off charging) - releasing ghost SoC to 100%% "
-                     "since it can't charge further regardless of what the ghost reports",
-               blocked_packs.c_str());
-      this->publish_hold_status_("released - pack charge MOS off (charging blocked by real BMS)");
+      ESP_LOGW(TAG, "All configured pack(s) (%s) report charge MOS off (every real BMS has cut off "
+                     "charging) - releasing ghost SoC to 100%% since none of them can charge further "
+                     "regardless of what the ghost reports",
+               mos_off_packs.c_str());
+      this->publish_hold_status_("released - all packs' charge MOS off (charging blocked by real BMS)");
     } else if (this->hold_failsafe_ms_ > 0 && (now - this->hold_start_time_) >= this->hold_failsafe_ms_) {
       this->holding_ = false;
       this->hold_state_pref_.save(&this->holding_);

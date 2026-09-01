@@ -43,13 +43,17 @@ pack" since the logic is identical no matter how many that ends up being:
    (default 20mV) **and** no configured pack is hotter than `cell_full_max_temp_c` (default 50°C),
    the ghost releases: it reports 100% SoC and full capacity, so the inverter gets a genuine
    full-charge signal and stops charging.
-4. It also releases immediately, regardless of balance, if **any** configured pack's own **charge
-   MOS is off** (`pack1_charge_mos`, `pack2_charge_mos`, ... — see [Home Assistant
-   entities](#home-assistant-entities)). If that pack's real BMS has already cut off charging
-   itself (cell OVP, over-temp, whatever tripped it), no current can flow no matter what the ghost
-   reports, so holding at 0% to chase a "confirmed full and balanced" release that can't happen
-   serves no purpose — the inverter should be told to stop trying. This deliberately only looks at
-   the charge MOS state, not the full protection/alarm bitfield (`pack1_protection_flags` etc.
+4. It also releases immediately, regardless of balance, once **every** configured pack's own
+   **charge MOS is off** (`pack1_charge_mos`, `pack2_charge_mos`, ... — see [Home Assistant
+   entities](#home-assistant-entities)). Once all of them have cut off charging themselves (cell
+   OVP, over-temp, whatever tripped each one), no current can flow into any of them no matter what
+   the ghost reports, so holding at 0% to chase a "confirmed full and balanced" release that can't
+   happen serves no purpose — the inverter should be told to stop trying. This requires *all*
+   packs, not just one: the whole point of a multi-pack array is for every pack to reach a genuine
+   full charge, so one pack finishing early (a normal, expected event - packs don't all hit their
+   own cutoff at the same moment) must not force an array-wide release while the others are still
+   mid-charge and need the time at voltage to actually balance. This also deliberately only looks
+   at the charge MOS state, not the full protection/alarm bitfield (`pack1_protection_flags` etc.
    stay informational-only) - see the code comment on this check in `evaluate_hold_()` for why.
 5. As soon as any configured pack's own reported SoC drops to `reset_soc_percent` (default 99%) —
    ie. discharging has started — the ghost re-arms back to holding, ready for the next cycle.
