@@ -120,8 +120,10 @@ void JkBmsGhostBattery::setup() {
   // and simply hasn't changed. Publish the true initial value here, once, unconditionally, so
   // every sensor has a real state from boot instead of only after its first change.
   if (this->bus_error_count_sensor_ != nullptr) this->bus_error_count_sensor_->publish_state(this->bus_error_count_);
-  if (this->pack1_data_stale_sensor_ != nullptr) this->pack1_data_stale_sensor_->publish_state(this->pack1_stale_published_);
-  if (this->pack2_data_stale_sensor_ != nullptr) this->pack2_data_stale_sensor_->publish_state(this->pack2_stale_published_);
+  for (uint8_t i = 0; i < this->pack_count_; i++) {
+    if (this->pack_data_stale_sensor_[i] != nullptr)
+      this->pack_data_stale_sensor_[i]->publish_state(this->pack_stale_published_[i]);
+  }
   if (this->hold_failsafe_remaining_sensor_ != nullptr) {
     uint32_t initial_remaining_s = 0;
     if (this->holding_ && this->hold_failsafe_ms_ > 0) initial_remaining_s = this->hold_failsafe_ms_ / 1000;
@@ -135,8 +137,9 @@ void JkBmsGhostBattery::dump_config() {
   ESP_LOGCONFIG(TAG, "  Ghost address: %u", this->ghost_address_);
   ESP_LOGCONFIG(TAG, "  Ghost capacity: %u Ah", (unsigned) (this->ghost_capacity_mah_ / 1000));
   ESP_LOGCONFIG(TAG, "  Pack count: %u", this->pack_count_);
-  ESP_LOGCONFIG(TAG, "  Pack 1 (master) address: %u", this->pack1_address_);
-  if (this->pack_count_ >= 2) ESP_LOGCONFIG(TAG, "  Pack 2 address: %u", this->pack2_address_);
+  for (uint8_t i = 0; i < this->pack_count_; i++) {
+    ESP_LOGCONFIG(TAG, "  Pack %u address: %u", i + 1, this->pack_addresses_[i]);
+  }
   ESP_LOGCONFIG(TAG, "  Cell full voltage: >= %u mV", this->cell_full_low_mv_);
   ESP_LOGCONFIG(TAG, "  Cell balance tolerance: %u mV", this->cell_balance_tolerance_mv_);
   if (this->cell_full_max_temp_c_ > 0) {
@@ -148,53 +151,38 @@ void JkBmsGhostBattery::dump_config() {
   ESP_LOGCONFIG(TAG, "  Hold failsafe: %u min", (unsigned) (this->hold_failsafe_ms_ / 60000));
   ESP_LOGCONFIG(TAG, "  Pack data stale timeout: %u s", (unsigned) (this->pack_stale_timeout_ms_ / 1000));
   LOG_PIN("  DE Pin: ", this->de_pin_);
-  LOG_SENSOR("  ", "Pack 1 min cell voltage", this->pack1_min_cell_voltage_sensor_);
-  LOG_SENSOR("  ", "Pack 1 max cell voltage", this->pack1_max_cell_voltage_sensor_);
-  LOG_SENSOR("  ", "Pack 2 min cell voltage", this->pack2_min_cell_voltage_sensor_);
-  LOG_SENSOR("  ", "Pack 2 max cell voltage", this->pack2_max_cell_voltage_sensor_);
-  LOG_SENSOR("  ", "Pack 1 SoC", this->pack1_soc_sensor_);
-  LOG_SENSOR("  ", "Pack 2 SoC", this->pack2_soc_sensor_);
+  for (uint8_t i = 0; i < this->pack_count_; i++) {
+    std::string p = "Pack " + std::to_string(i + 1);
+    LOG_SENSOR("  ", (p + " min cell voltage").c_str(), this->pack_min_cell_voltage_sensor_[i]);
+    LOG_SENSOR("  ", (p + " max cell voltage").c_str(), this->pack_max_cell_voltage_sensor_[i]);
+    LOG_SENSOR("  ", (p + " SoC").c_str(), this->pack_soc_sensor_[i]);
+    LOG_SENSOR("  ", (p + " voltage").c_str(), this->pack_voltage_sensor_[i]);
+    LOG_SENSOR("  ", (p + " current").c_str(), this->pack_current_sensor_[i]);
+    LOG_SENSOR("  ", (p + " power").c_str(), this->pack_power_sensor_[i]);
+    LOG_SENSOR("  ", (p + " temperature").c_str(), this->pack_temperature_sensor_[i]);
+    LOG_SENSOR("  ", (p + " cell voltage diff").c_str(), this->pack_cell_voltage_diff_sensor_[i]);
+    LOG_SENSOR("  ", (p + " RCV (rated charge voltage)").c_str(), this->pack_rcv_voltage_sensor_[i]);
+    LOG_SENSOR("  ", (p + " SOH").c_str(), this->pack_soh_sensor_[i]);
+    LOG_SENSOR("  ", (p + " fault count").c_str(), this->pack_fault_count_sensor_[i]);
+    LOG_SENSOR("  ", (p + " cycle count").c_str(), this->pack_cycle_count_sensor_[i]);
+    LOG_SENSOR("  ", (p + " balance current").c_str(), this->pack_balance_current_sensor_[i]);
+    LOG_TEXT_SENSOR("  ", (p + " protection flags").c_str(), this->pack_protection_flags_text_sensor_[i]);
+    LOG_BINARY_SENSOR("  ", (p + " data stale").c_str(), this->pack_data_stale_sensor_[i]);
+    LOG_BINARY_SENSOR("  ", (p + " charge MOS").c_str(), this->pack_charge_mos_sensor_[i]);
+    LOG_BINARY_SENSOR("  ", (p + " discharge MOS").c_str(), this->pack_discharge_mos_sensor_[i]);
+    LOG_BINARY_SENSOR("  ", (p + " protection active").c_str(), this->pack_protection_active_sensor_[i]);
+  }
   LOG_SENSOR("  ", "Ghost fake SoC", this->ghost_fake_soc_sensor_);
-  LOG_SENSOR("  ", "Pack 1 voltage", this->pack1_voltage_sensor_);
-  LOG_SENSOR("  ", "Pack 2 voltage", this->pack2_voltage_sensor_);
-  LOG_SENSOR("  ", "Pack 1 current", this->pack1_current_sensor_);
-  LOG_SENSOR("  ", "Pack 2 current", this->pack2_current_sensor_);
-  LOG_SENSOR("  ", "Pack 1 power", this->pack1_power_sensor_);
-  LOG_SENSOR("  ", "Pack 2 power", this->pack2_power_sensor_);
   LOG_SENSOR("  ", "Total power", this->total_power_sensor_);
   LOG_SENSOR("  ", "Total current", this->total_current_sensor_);
   LOG_SENSOR("  ", "Total cell voltage diff", this->total_cell_voltage_diff_sensor_);
-  LOG_SENSOR("  ", "Pack 1 temperature", this->pack1_temperature_sensor_);
-  LOG_SENSOR("  ", "Pack 2 temperature", this->pack2_temperature_sensor_);
-  LOG_SENSOR("  ", "Pack 1 cell voltage diff", this->pack1_cell_voltage_diff_sensor_);
-  LOG_SENSOR("  ", "Pack 2 cell voltage diff", this->pack2_cell_voltage_diff_sensor_);
   LOG_SENSOR("  ", "Average SoC", this->average_soc_sensor_);
   LOG_SENSOR("  ", "Average voltage", this->average_voltage_sensor_);
-  LOG_SENSOR("  ", "Pack 1 RCV (rated charge voltage)", this->pack1_rcv_voltage_sensor_);
-  LOG_SENSOR("  ", "Pack 2 RCV (rated charge voltage)", this->pack2_rcv_voltage_sensor_);
   LOG_SENSOR("  ", "Bus CRC error count", this->bus_error_count_sensor_);
   LOG_SENSOR("  ", "Hold failsafe remaining", this->hold_failsafe_remaining_sensor_);
   LOG_SENSOR("  ", "Total charge energy", this->total_charge_energy_sensor_);
   LOG_SENSOR("  ", "Total discharge energy", this->total_discharge_energy_sensor_);
-  LOG_SENSOR("  ", "Pack 1 SOH", this->pack1_soh_sensor_);
-  LOG_SENSOR("  ", "Pack 2 SOH", this->pack2_soh_sensor_);
-  LOG_SENSOR("  ", "Pack 1 fault count", this->pack1_fault_count_sensor_);
-  LOG_SENSOR("  ", "Pack 2 fault count", this->pack2_fault_count_sensor_);
-  LOG_SENSOR("  ", "Pack 1 cycle count", this->pack1_cycle_count_sensor_);
-  LOG_SENSOR("  ", "Pack 2 cycle count", this->pack2_cycle_count_sensor_);
-  LOG_SENSOR("  ", "Pack 1 balance current", this->pack1_balance_current_sensor_);
-  LOG_SENSOR("  ", "Pack 2 balance current", this->pack2_balance_current_sensor_);
   LOG_TEXT_SENSOR("  ", "Hold status", this->hold_status_text_sensor_);
-  LOG_TEXT_SENSOR("  ", "Pack 1 protection flags", this->pack1_protection_flags_text_sensor_);
-  LOG_TEXT_SENSOR("  ", "Pack 2 protection flags", this->pack2_protection_flags_text_sensor_);
-  LOG_BINARY_SENSOR("  ", "Pack 1 data stale", this->pack1_data_stale_sensor_);
-  LOG_BINARY_SENSOR("  ", "Pack 2 data stale", this->pack2_data_stale_sensor_);
-  LOG_BINARY_SENSOR("  ", "Pack 1 charge MOS", this->pack1_charge_mos_sensor_);
-  LOG_BINARY_SENSOR("  ", "Pack 2 charge MOS", this->pack2_charge_mos_sensor_);
-  LOG_BINARY_SENSOR("  ", "Pack 1 discharge MOS", this->pack1_discharge_mos_sensor_);
-  LOG_BINARY_SENSOR("  ", "Pack 2 discharge MOS", this->pack2_discharge_mos_sensor_);
-  LOG_BINARY_SENSOR("  ", "Pack 1 protection active", this->pack1_protection_active_sensor_);
-  LOG_BINARY_SENSOR("  ", "Pack 2 protection active", this->pack2_protection_active_sensor_);
 }
 
 void JkBmsGhostBattery::loop() {
@@ -249,9 +237,10 @@ bool JkBmsGhostBattery::is_query_for_us_() {
   // NOTE: this used to also treat address 0x00 as "for us" (leftover from the single-BMS Arduino
   // origin of this frame handling, where the master BMS is always the only device and its own
   // address doesn't matter). On this project's RS485 bus that's wrong: address 0 is the real
-  // master pack's own address (pack1_address defaults to 0 - see README's "problem this solves"),
-  // so treating queries to 0 as also being for the ghost meant the ghost answered every single
-  // poll of the real master pack too, colliding on the bus with pack1's own genuine response.
+  // master pack's own address (pack 1's address defaults to 0 - see README's "problem this
+  // solves"), so treating queries to 0 as also being for the ghost meant the ghost answered every
+  // single poll of the real master pack too, colliding on the bus with pack 1's own genuine
+  // response.
   if (this->buf_[0] != this->ghost_address_) return false;
 
   uint16_t expected = this->crc16_(this->num_bytes_ - 2);
@@ -302,7 +291,7 @@ void JkBmsGhostBattery::send_frame2_() {
   // the trailer this touches.
   this->patch_source_address_();
 
-  // TEST: hold the ghost's reported SoC at 0% until both real packs are confirmed full and
+  // TEST: hold the ghost's reported SoC at 0% until every real pack is confirmed full and
   // balanced (see evaluate_hold_()); then switch to 100%/full so the inverter gets a genuine
   // full-charge signal and actually stops charging. is_holding_() lets an armed manual override
   // substitute its own forced value here instead of the automatic evaluation.
@@ -328,22 +317,19 @@ void JkBmsGhostBattery::send_frame2_() {
   this->buf_[SOC_OFFSET] = holding_now ? 0 : 100;
   if (this->ghost_fake_soc_sensor_ != nullptr) this->ghost_fake_soc_sensor_->publish_state(holding_now ? 0 : 100);
 
-  // report the average of both real packs' temperature instead of the static ~27.5C baked into
-  // the template. If only one pack has been seen so far, use that one; if neither has, leave the
-  // template's static value in place (this also means the ghost works fine with just one real
-  // pack connected - it just never gets to the "average of two" case).
-  int16_t temp_c10;
-  bool have_temp = true;
-  if (this->pack1_seen_ && this->pack2_seen_) {
-    temp_c10 = (int16_t) ((this->pack1_temperature_c10_ + this->pack2_temperature_c10_) / 2);
-  } else if (this->pack1_seen_) {
-    temp_c10 = this->pack1_temperature_c10_;
-  } else if (this->pack2_seen_) {
-    temp_c10 = this->pack2_temperature_c10_;
-  } else {
-    have_temp = false;
+  // report the average temperature of every real pack seen so far instead of the static ~27.5C
+  // baked into the template. Uses whatever subset of packs has reported in so far (not gated on
+  // every configured pack having been seen) so the ghost still reports a sane temperature with
+  // only some packs connected; if none have reported yet, leave the template's static value alone.
+  int32_t temp_sum_c10 = 0;
+  uint8_t temp_count = 0;
+  for (uint8_t i = 0; i < this->pack_count_; i++) {
+    if (!this->pack_seen_[i]) continue;
+    temp_sum_c10 += this->pack_temperature_c10_[i];
+    temp_count++;
   }
-  if (have_temp) {
+  if (temp_count > 0) {
+    int16_t temp_c10 = (int16_t) (temp_sum_c10 / temp_count);
     this->buf_[TEMPERATURE_OFFSET + 0] = (uint8_t) (temp_c10 & 0xFF);
     this->buf_[TEMPERATURE_OFFSET + 1] = (uint8_t) ((temp_c10 >> 8) & 0xFF);
   }
@@ -378,23 +364,24 @@ void JkBmsGhostBattery::sniff_real_pack_() {
     return;
 
   uint8_t source_address = this->buf_[SOURCE_ADDRESS_OFFSET];
-  // in single-pack mode (pack_count_ == 1), pack2_address_ is ignored entirely - only pack1 exists
-  bool matches_pack2 = this->pack_count_ >= 2 && source_address == this->pack2_address_;
-  if (source_address != this->pack1_address_ && !matches_pack2) return;
+  int16_t pack_index = -1;
+  for (uint8_t i = 0; i < this->pack_count_; i++) {
+    if (this->pack_addresses_[i] == source_address) {
+      pack_index = i;
+      break;
+    }
+  }
+  if (pack_index < 0) return;  // not one of our configured packs - ignore
 
-  // settings frame (0x01) from either pack - this is where RCV (rated charge voltage) lives.
+  // settings frame (0x01) from a real pack - this is where RCV (rated charge voltage) lives.
   // Passive only: we never query for this ourselves, so it only updates if something else on the
   // bus happens to request that pack's settings frame.
   if (this->buf_[4] == 0x01) {
     uint32_t rcv_mv = this->buf_[RCV_OFFSET] | ((uint32_t) this->buf_[RCV_OFFSET + 1] << 8) |
                       ((uint32_t) this->buf_[RCV_OFFSET + 2] << 16) | ((uint32_t) this->buf_[RCV_OFFSET + 3] << 24);
-    if (source_address == this->pack1_address_) {
-      this->pack1_rcv_voltage_mv_ = rcv_mv;
-      if (this->pack1_rcv_voltage_sensor_ != nullptr) this->pack1_rcv_voltage_sensor_->publish_state(rcv_mv / 1000.0f);
-    } else {
-      this->pack2_rcv_voltage_mv_ = rcv_mv;
-      if (this->pack2_rcv_voltage_sensor_ != nullptr) this->pack2_rcv_voltage_sensor_->publish_state(rcv_mv / 1000.0f);
-    }
+    this->pack_rcv_voltage_mv_[pack_index] = rcv_mv;
+    if (this->pack_rcv_voltage_sensor_[pack_index] != nullptr)
+      this->pack_rcv_voltage_sensor_[pack_index]->publish_state(rcv_mv / 1000.0f);
     ESP_LOGD(TAG, "Pack 0x%02X settings: RCV %.3fV", source_address, rcv_mv / 1000.0f);
     return;
   }
@@ -432,100 +419,94 @@ void JkBmsGhostBattery::sniff_real_pack_() {
   int16_t balance_current_ma =
       (int16_t) (this->buf_[BALANCE_CURRENT_OFFSET] | ((uint16_t) this->buf_[BALANCE_CURRENT_OFFSET + 1] << 8));
 
-  if (source_address == this->pack1_address_) {
-    this->pack1_min_mv_ = min_mv;
-    this->pack1_max_mv_ = max_mv;
-    this->pack1_soc_ = soc;
-    this->pack1_voltage_mv_ = voltage_mv;
-    this->pack1_current_ma_ = current_ma;
-    this->pack1_temperature_c10_ = temperature_c10;
-    this->pack1_charge_mos_on_ = charge_mos_on;
-    this->pack1_seen_ = true;
-    this->pack1_last_update_ms_ = millis();
-    if (this->pack1_min_cell_voltage_sensor_ != nullptr) this->pack1_min_cell_voltage_sensor_->publish_state(min_mv / 1000.0f);
-    if (this->pack1_max_cell_voltage_sensor_ != nullptr) this->pack1_max_cell_voltage_sensor_->publish_state(max_mv / 1000.0f);
-    if (this->pack1_cell_voltage_diff_sensor_ != nullptr) this->pack1_cell_voltage_diff_sensor_->publish_state((max_mv - min_mv) / 1000.0f);
-    if (this->pack1_soc_sensor_ != nullptr) this->pack1_soc_sensor_->publish_state(soc);
-    if (this->pack1_voltage_sensor_ != nullptr) this->pack1_voltage_sensor_->publish_state(voltage_mv / 1000.0f);
-    if (this->pack1_current_sensor_ != nullptr) this->pack1_current_sensor_->publish_state(current_ma / 1000.0f);
-    if (this->pack1_temperature_sensor_ != nullptr) this->pack1_temperature_sensor_->publish_state(temperature_c10 / 10.0f);
-    if (this->pack1_power_sensor_ != nullptr)
-      this->pack1_power_sensor_->publish_state((voltage_mv / 1000.0f) * (current_ma / 1000.0f) / 1000.0f);
-    for (uint8_t c = 0; c < CELL_COUNT; c++) {
-      this->pack1_cell_mv_[c] = cell_mv[c];
-      if (this->pack1_cell_sensors_[c] != nullptr) this->pack1_cell_sensors_[c]->publish_state(cell_mv[c] / 1000.0f);
-    }
-    if (this->pack1_charge_mos_sensor_ != nullptr) this->pack1_charge_mos_sensor_->publish_state(charge_mos_on);
-    if (this->pack1_discharge_mos_sensor_ != nullptr) this->pack1_discharge_mos_sensor_->publish_state(discharge_mos_on);
-    if (this->pack1_protection_active_sensor_ != nullptr) this->pack1_protection_active_sensor_->publish_state(alarm_bits != 0);
-    if (this->pack1_protection_flags_text_sensor_ != nullptr)
-      this->pack1_protection_flags_text_sensor_->publish_state(decode_protection_flags_(alarm_bits));
-    if (this->pack1_soh_sensor_ != nullptr) this->pack1_soh_sensor_->publish_state(soh);
-    if (this->pack1_fault_count_sensor_ != nullptr) this->pack1_fault_count_sensor_->publish_state(fault_count);
-    if (this->pack1_cycle_count_sensor_ != nullptr) this->pack1_cycle_count_sensor_->publish_state(cycle_count);
-    if (this->pack1_balance_current_sensor_ != nullptr) this->pack1_balance_current_sensor_->publish_state(balance_current_ma / 1000.0f);
-  } else {
-    this->pack2_min_mv_ = min_mv;
-    this->pack2_max_mv_ = max_mv;
-    this->pack2_soc_ = soc;
-    this->pack2_voltage_mv_ = voltage_mv;
-    this->pack2_current_ma_ = current_ma;
-    this->pack2_temperature_c10_ = temperature_c10;
-    this->pack2_charge_mos_on_ = charge_mos_on;
-    this->pack2_seen_ = true;
-    this->pack2_last_update_ms_ = millis();
-    if (this->pack2_min_cell_voltage_sensor_ != nullptr) this->pack2_min_cell_voltage_sensor_->publish_state(min_mv / 1000.0f);
-    if (this->pack2_max_cell_voltage_sensor_ != nullptr) this->pack2_max_cell_voltage_sensor_->publish_state(max_mv / 1000.0f);
-    if (this->pack2_cell_voltage_diff_sensor_ != nullptr) this->pack2_cell_voltage_diff_sensor_->publish_state((max_mv - min_mv) / 1000.0f);
-    if (this->pack2_soc_sensor_ != nullptr) this->pack2_soc_sensor_->publish_state(soc);
-    if (this->pack2_voltage_sensor_ != nullptr) this->pack2_voltage_sensor_->publish_state(voltage_mv / 1000.0f);
-    if (this->pack2_current_sensor_ != nullptr) this->pack2_current_sensor_->publish_state(current_ma / 1000.0f);
-    if (this->pack2_temperature_sensor_ != nullptr) this->pack2_temperature_sensor_->publish_state(temperature_c10 / 10.0f);
-    if (this->pack2_power_sensor_ != nullptr)
-      this->pack2_power_sensor_->publish_state((voltage_mv / 1000.0f) * (current_ma / 1000.0f) / 1000.0f);
-    for (uint8_t c = 0; c < CELL_COUNT; c++) {
-      this->pack2_cell_mv_[c] = cell_mv[c];
-      if (this->pack2_cell_sensors_[c] != nullptr) this->pack2_cell_sensors_[c]->publish_state(cell_mv[c] / 1000.0f);
-    }
-    if (this->pack2_charge_mos_sensor_ != nullptr) this->pack2_charge_mos_sensor_->publish_state(charge_mos_on);
-    if (this->pack2_discharge_mos_sensor_ != nullptr) this->pack2_discharge_mos_sensor_->publish_state(discharge_mos_on);
-    if (this->pack2_protection_active_sensor_ != nullptr) this->pack2_protection_active_sensor_->publish_state(alarm_bits != 0);
-    if (this->pack2_protection_flags_text_sensor_ != nullptr)
-      this->pack2_protection_flags_text_sensor_->publish_state(decode_protection_flags_(alarm_bits));
-    if (this->pack2_soh_sensor_ != nullptr) this->pack2_soh_sensor_->publish_state(soh);
-    if (this->pack2_fault_count_sensor_ != nullptr) this->pack2_fault_count_sensor_->publish_state(fault_count);
-    if (this->pack2_cycle_count_sensor_ != nullptr) this->pack2_cycle_count_sensor_->publish_state(cycle_count);
-    if (this->pack2_balance_current_sensor_ != nullptr) this->pack2_balance_current_sensor_->publish_state(balance_current_ma / 1000.0f);
+  this->pack_min_mv_[pack_index] = min_mv;
+  this->pack_max_mv_[pack_index] = max_mv;
+  this->pack_soc_[pack_index] = soc;
+  this->pack_voltage_mv_[pack_index] = voltage_mv;
+  this->pack_current_ma_[pack_index] = current_ma;
+  this->pack_temperature_c10_[pack_index] = temperature_c10;
+  this->pack_charge_mos_on_[pack_index] = charge_mos_on;
+  this->pack_seen_[pack_index] = true;
+  this->pack_last_update_ms_[pack_index] = millis();
+  if (this->pack_min_cell_voltage_sensor_[pack_index] != nullptr)
+    this->pack_min_cell_voltage_sensor_[pack_index]->publish_state(min_mv / 1000.0f);
+  if (this->pack_max_cell_voltage_sensor_[pack_index] != nullptr)
+    this->pack_max_cell_voltage_sensor_[pack_index]->publish_state(max_mv / 1000.0f);
+  if (this->pack_cell_voltage_diff_sensor_[pack_index] != nullptr)
+    this->pack_cell_voltage_diff_sensor_[pack_index]->publish_state((max_mv - min_mv) / 1000.0f);
+  if (this->pack_soc_sensor_[pack_index] != nullptr) this->pack_soc_sensor_[pack_index]->publish_state(soc);
+  if (this->pack_voltage_sensor_[pack_index] != nullptr)
+    this->pack_voltage_sensor_[pack_index]->publish_state(voltage_mv / 1000.0f);
+  if (this->pack_current_sensor_[pack_index] != nullptr)
+    this->pack_current_sensor_[pack_index]->publish_state(current_ma / 1000.0f);
+  if (this->pack_temperature_sensor_[pack_index] != nullptr)
+    this->pack_temperature_sensor_[pack_index]->publish_state(temperature_c10 / 10.0f);
+  if (this->pack_power_sensor_[pack_index] != nullptr)
+    this->pack_power_sensor_[pack_index]->publish_state((voltage_mv / 1000.0f) * (current_ma / 1000.0f) / 1000.0f);
+  for (uint8_t c = 0; c < CELL_COUNT; c++) {
+    this->pack_cell_mv_[pack_index][c] = cell_mv[c];
+    if (this->pack_cell_sensors_[pack_index][c] != nullptr)
+      this->pack_cell_sensors_[pack_index][c]->publish_state(cell_mv[c] / 1000.0f);
   }
+  if (this->pack_charge_mos_sensor_[pack_index] != nullptr)
+    this->pack_charge_mos_sensor_[pack_index]->publish_state(charge_mos_on);
+  if (this->pack_discharge_mos_sensor_[pack_index] != nullptr)
+    this->pack_discharge_mos_sensor_[pack_index]->publish_state(discharge_mos_on);
+  if (this->pack_protection_active_sensor_[pack_index] != nullptr)
+    this->pack_protection_active_sensor_[pack_index]->publish_state(alarm_bits != 0);
+  if (this->pack_protection_flags_text_sensor_[pack_index] != nullptr)
+    this->pack_protection_flags_text_sensor_[pack_index]->publish_state(decode_protection_flags_(alarm_bits));
+  if (this->pack_soh_sensor_[pack_index] != nullptr) this->pack_soh_sensor_[pack_index]->publish_state(soh);
+  if (this->pack_fault_count_sensor_[pack_index] != nullptr)
+    this->pack_fault_count_sensor_[pack_index]->publish_state(fault_count);
+  if (this->pack_cycle_count_sensor_[pack_index] != nullptr)
+    this->pack_cycle_count_sensor_[pack_index]->publish_state(cycle_count);
+  if (this->pack_balance_current_sensor_[pack_index] != nullptr)
+    this->pack_balance_current_sensor_[pack_index]->publish_state(balance_current_ma / 1000.0f);
 
-  // in single-pack mode, the "average" is just pack1's own value
-  if (this->pack1_seen_ && (this->pack_count_ < 2 || this->pack2_seen_)) {
-    float divisor = this->pack_count_ >= 2 ? 2.0f : 1.0f;
-    float soc_total = this->pack1_soc_ + (this->pack_count_ >= 2 ? this->pack2_soc_ : 0);
-    float voltage_total_mv = this->pack1_voltage_mv_ + (this->pack_count_ >= 2 ? this->pack2_voltage_mv_ : 0);
+  // combined sensors (average/total/energy) only publish once EVERY configured pack has been
+  // seen at least once - a partial average (eg. dividing by pack_count_ with only some packs
+  // reported in) would be actively misleading rather than just incomplete
+  bool all_seen = true;
+  for (uint8_t i = 0; i < this->pack_count_; i++) {
+    if (!this->pack_seen_[i]) {
+      all_seen = false;
+      break;
+    }
+  }
+  if (all_seen) {
+    float soc_total = 0, voltage_total_mv = 0, current_total_a = 0, power_total_kw = 0;
+    uint16_t total_min_mv = 0xFFFF, total_max_mv = 0;
+    for (uint8_t i = 0; i < this->pack_count_; i++) {
+      soc_total += this->pack_soc_[i];
+      voltage_total_mv += this->pack_voltage_mv_[i];
+      float pack_current_a = this->pack_current_ma_[i] / 1000.0f;
+      float pack_voltage_v = this->pack_voltage_mv_[i] / 1000.0f;
+      current_total_a += pack_current_a;
+      power_total_kw += pack_voltage_v * pack_current_a / 1000.0f;
+      if (this->pack_min_mv_[i] < total_min_mv) total_min_mv = this->pack_min_mv_[i];
+      if (this->pack_max_mv_[i] > total_max_mv) total_max_mv = this->pack_max_mv_[i];
+    }
+    float divisor = (float) this->pack_count_;
     if (this->average_soc_sensor_ != nullptr) this->average_soc_sensor_->publish_state(soc_total / divisor);
-    if (this->average_voltage_sensor_ != nullptr) this->average_voltage_sensor_->publish_state(voltage_total_mv / divisor / 1000.0f);
-
-    // totals are a straight sum, not an average - in single-pack mode this is just pack1's own value
-    float total_current_a = this->pack1_current_ma_ / 1000.0f + (this->pack_count_ >= 2 ? this->pack2_current_ma_ / 1000.0f : 0.0f);
-    float pack1_power_kw = (this->pack1_voltage_mv_ / 1000.0f) * (this->pack1_current_ma_ / 1000.0f) / 1000.0f;
-    float pack2_power_kw = this->pack_count_ >= 2 ? (this->pack2_voltage_mv_ / 1000.0f) * (this->pack2_current_ma_ / 1000.0f) / 1000.0f : 0.0f;
-    if (this->total_current_sensor_ != nullptr) this->total_current_sensor_->publish_state(total_current_a);
-    float total_power_kw = pack1_power_kw + pack2_power_kw;
-    if (this->total_power_sensor_ != nullptr) this->total_power_sensor_->publish_state(total_power_kw);
+    if (this->average_voltage_sensor_ != nullptr)
+      this->average_voltage_sensor_->publish_state(voltage_total_mv / divisor / 1000.0f);
+    if (this->total_current_sensor_ != nullptr) this->total_current_sensor_->publish_state(current_total_a);
+    if (this->total_power_sensor_ != nullptr) this->total_power_sensor_->publish_state(power_total_kw);
 
     // Home Assistant Energy dashboard integration: running kWh totals, split into energy
     // into/out of the battery (positive total_power = charging, per the JK protocol's own sign
-    // convention - see set_pack1_current_sensor's comment). Each call integrates power x elapsed
-    // time since the previous call; energy_last_update_ms_ starts at 0 so the very first call
-    // only records a timestamp instead of a bogus multi-second-since-boot energy spike.
+    // convention - see pack_current sensor's comment in sensor/__init__.py). Each call integrates
+    // power x elapsed time since the previous call; energy_last_update_ms_ starts at 0 so the
+    // very first call only records a timestamp instead of a bogus multi-second-since-boot energy
+    // spike.
     uint32_t energy_now = millis();
     if (this->energy_last_update_ms_ != 0) {
       float hours_elapsed = (energy_now - this->energy_last_update_ms_) / 3600000.0f;
-      if (total_power_kw > 0) {
-        this->total_charge_energy_kwh_ += total_power_kw * hours_elapsed;
-      } else if (total_power_kw < 0) {
-        this->total_discharge_energy_kwh_ += -total_power_kw * hours_elapsed;
+      if (power_total_kw > 0) {
+        this->total_charge_energy_kwh_ += power_total_kw * hours_elapsed;
+      } else if (power_total_kw < 0) {
+        this->total_discharge_energy_kwh_ += -power_total_kw * hours_elapsed;
       }
       if (this->total_charge_energy_sensor_ != nullptr)
         this->total_charge_energy_sensor_->publish_state(this->total_charge_energy_kwh_);
@@ -535,12 +516,6 @@ void JkBmsGhostBattery::sniff_real_pack_() {
     this->energy_last_update_ms_ = energy_now;
 
     // highest cell minus lowest cell across ALL cells on ALL configured packs (not per-pack)
-    uint16_t total_min_mv = this->pack1_min_mv_;
-    uint16_t total_max_mv = this->pack1_max_mv_;
-    if (this->pack_count_ >= 2) {
-      if (this->pack2_min_mv_ < total_min_mv) total_min_mv = this->pack2_min_mv_;
-      if (this->pack2_max_mv_ > total_max_mv) total_max_mv = this->pack2_max_mv_;
-    }
     if (this->total_cell_voltage_diff_sensor_ != nullptr)
       this->total_cell_voltage_diff_sensor_->publish_state((total_max_mv - total_min_mv) / 1000.0f);
   }
@@ -557,22 +532,19 @@ void JkBmsGhostBattery::evaluate_hold_() {
   // "fresh" means we've seen this pack at least once AND its last update wasn't too long ago -
   // guards against evaluating full/balanced (or re-arm) decisions off a stale cached reading from
   // a pack that has since gone silent (wiring fault, BMS reset, pack physically disconnected).
-  bool pack1_fresh = this->pack1_seen_ && (now - this->pack1_last_update_ms_) < this->pack_stale_timeout_ms_;
-  // in single-pack mode (pack_count_ == 1), pack2 is never required, so it's vacuously "fresh"
-  bool pack2_fresh = this->pack_count_ < 2 ||
-                      (this->pack2_seen_ && (now - this->pack2_last_update_ms_) < this->pack_stale_timeout_ms_);
+  bool fresh[MAX_PACKS];
+  for (uint8_t i = 0; i < this->pack_count_; i++) {
+    fresh[i] = this->pack_seen_[i] && (now - this->pack_last_update_ms_[i]) < this->pack_stale_timeout_ms_;
+  }
 
   // dedicated stale sensors, one per pack - only publish on change so this doesn't spam the
   // Home Assistant entity history on every single loop() tick
-  bool pack1_stale = this->pack1_seen_ && !pack1_fresh;
-  if (this->pack1_data_stale_sensor_ != nullptr && pack1_stale != this->pack1_stale_published_) {
-    this->pack1_data_stale_sensor_->publish_state(pack1_stale);
-    this->pack1_stale_published_ = pack1_stale;
-  }
-  bool pack2_stale = this->pack_count_ >= 2 && this->pack2_seen_ && !pack2_fresh;
-  if (this->pack2_data_stale_sensor_ != nullptr && pack2_stale != this->pack2_stale_published_) {
-    this->pack2_data_stale_sensor_->publish_state(pack2_stale);
-    this->pack2_stale_published_ = pack2_stale;
+  for (uint8_t i = 0; i < this->pack_count_; i++) {
+    bool stale = this->pack_seen_[i] && !fresh[i];
+    if (this->pack_data_stale_sensor_[i] != nullptr && stale != this->pack_stale_published_[i]) {
+      this->pack_data_stale_sensor_[i]->publish_state(stale);
+      this->pack_stale_published_[i] = stale;
+    }
   }
 
   // seconds left before hold_failsafe_ms_ forces a release without confirmed balance - lets a
@@ -592,41 +564,46 @@ void JkBmsGhostBattery::evaluate_hold_() {
   if (this->holding_) {
     // cell_full_max_temp_c_ == 0 means the check is disabled; otherwise a pack that's too hot
     // blocks release even if it's otherwise full and balanced - see set_cell_full_max_temp_c()
-    bool pack1_temp_ok = this->cell_full_max_temp_c_ == 0 ||
-                          this->pack1_temperature_c10_ <= this->cell_full_max_temp_c_ * 10;
-    bool pack2_temp_ok = this->cell_full_max_temp_c_ == 0 ||
-                          this->pack2_temperature_c10_ <= this->cell_full_max_temp_c_ * 10;
-    bool pack1_ok = pack1_fresh && pack1_temp_ok && this->pack1_min_mv_ >= this->cell_full_low_mv_ &&
-                     (this->pack1_max_mv_ - this->pack1_min_mv_) <= this->cell_balance_tolerance_mv_;
-    bool pack2_ok = this->pack_count_ < 2 ||
-                    (pack2_fresh && pack2_temp_ok && this->pack2_min_mv_ >= this->cell_full_low_mv_ &&
-                     (this->pack2_max_mv_ - this->pack2_min_mv_) <= this->cell_balance_tolerance_mv_);
+    bool all_ok = true;
+    bool any_charge_blocked = false;
+    std::string blocked_packs;
+    for (uint8_t i = 0; i < this->pack_count_; i++) {
+      bool temp_ok = this->cell_full_max_temp_c_ == 0 || this->pack_temperature_c10_[i] <= this->cell_full_max_temp_c_ * 10;
+      bool pack_ok = fresh[i] && temp_ok && this->pack_min_mv_[i] >= this->cell_full_low_mv_ &&
+                     (this->pack_max_mv_[i] - this->pack_min_mv_[i]) <= this->cell_balance_tolerance_mv_;
+      if (!pack_ok) all_ok = false;
 
-    // if the real pack's own charge MOS is already off, it cannot accept any more charge current
-    // right now regardless of why (cell OVP, over-temp, whatever tripped it) - holding at 0% just
-    // to chase a "confirmed full and balanced" release that can't happen without current flowing
-    // serves no purpose, and the inverter should be told to stop trying. This deliberately only
-    // looks at charge_mos (a single, unambiguous "can it charge" answer the real BMS has already
-    // computed for us), not the full protection_active/protection_flags bitfield - those cover
-    // faults (eg. discharge OCP, GPS disconnected) that have nothing to do with this decision, and
-    // hand-parsing 24 loosely-documented bits into "should release" vs "should not" isn't worth
-    // the risk of getting a safety-relevant call wrong. protection_active/protection_flags stay
-    // informational-only, visible in Home Assistant for you to act on.
-    bool pack1_charge_blocked = pack1_fresh && !this->pack1_charge_mos_on_;
-    bool pack2_charge_blocked = this->pack_count_ >= 2 && pack2_fresh && !this->pack2_charge_mos_on_;
+      // if a real pack's own charge MOS is already off, it cannot accept any more charge current
+      // right now regardless of why (cell OVP, over-temp, whatever tripped it) - holding at 0%
+      // just to chase a "confirmed full and balanced" release that can't happen without current
+      // flowing serves no purpose, and the inverter should be told to stop trying. This
+      // deliberately only looks at charge_mos (a single, unambiguous "can it charge" answer the
+      // real BMS has already computed for us), not the full protection_active/protection_flags
+      // bitfield - those cover faults (eg. discharge OCP, GPS disconnected) that have nothing to
+      // do with this decision, and hand-parsing 24 loosely-documented bits into "should release"
+      // vs "should not" isn't worth the risk of getting a safety-relevant call wrong.
+      // protection_active/protection_flags stay informational-only, visible in Home Assistant for
+      // you to act on.
+      bool charge_blocked = fresh[i] && !this->pack_charge_mos_on_[i];
+      if (charge_blocked) {
+        any_charge_blocked = true;
+        if (!blocked_packs.empty()) blocked_packs += ", ";
+        blocked_packs += std::to_string(i + 1);
+      }
+    }
 
-    if (pack1_ok && pack2_ok) {
+    if (all_ok) {
       this->holding_ = false;
       this->hold_state_pref_.save(&this->holding_);
       ESP_LOGI(TAG, "Pack(s) balanced (<=%u mV spread) and full (>=%u mV) - releasing ghost SoC to 100%%",
                this->cell_balance_tolerance_mv_, this->cell_full_low_mv_);
       this->publish_hold_status_("released - balanced and full");
-    } else if (pack1_charge_blocked || pack2_charge_blocked) {
+    } else if (any_charge_blocked) {
       this->holding_ = false;
       this->hold_state_pref_.save(&this->holding_);
-      ESP_LOGW(TAG, "Pack %s charge MOS is off (real BMS has cut off charging) - releasing ghost SoC to 100%% "
+      ESP_LOGW(TAG, "Pack(s) %s charge MOS off (real BMS has cut off charging) - releasing ghost SoC to 100%% "
                      "since it can't charge further regardless of what the ghost reports",
-               pack1_charge_blocked && pack2_charge_blocked ? "1 and 2" : (pack1_charge_blocked ? "1" : "2"));
+               blocked_packs.c_str());
       this->publish_hold_status_("released - pack charge MOS off (charging blocked by real BMS)");
     } else if (this->hold_failsafe_ms_ > 0 && (now - this->hold_start_time_) >= this->hold_failsafe_ms_) {
       this->holding_ = false;
@@ -635,9 +612,13 @@ void JkBmsGhostBattery::evaluate_hold_() {
       this->publish_hold_status_("released - failsafe (balance not confirmed)");
     }
   } else {
-    bool pack2_low = this->pack_count_ >= 2 && this->pack2_seen_ && this->pack2_soc_ <= this->reset_soc_percent_;
-    bool went_stale = !pack1_fresh || !pack2_fresh;
-    if ((this->pack1_seen_ && this->pack1_soc_ <= this->reset_soc_percent_) || pack2_low || went_stale) {
+    bool any_pack_low = false;
+    bool went_stale = false;
+    for (uint8_t i = 0; i < this->pack_count_; i++) {
+      if (this->pack_seen_[i] && this->pack_soc_[i] <= this->reset_soc_percent_) any_pack_low = true;
+      if (!fresh[i]) went_stale = true;
+    }
+    if (any_pack_low || went_stale) {
       this->holding_ = true;
       this->hold_start_time_ = now;
       this->hold_state_pref_.save(&this->holding_);
