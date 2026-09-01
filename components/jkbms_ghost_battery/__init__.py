@@ -14,11 +14,14 @@ JkBmsGhostBattery = jkbms_ghost_battery_ns.class_(
 
 CONF_JKBMS_GHOST_BATTERY_ID = "jkbms_ghost_battery_id"
 
+# must match MAX_PACKS in jkbms_ghost_battery.cpp/.h - both sides are hardcoded compile/schema
+# bounds rather than shared constants, since the C++ array sizes are fixed at compile time anyway
+MAX_PACKS = 8
+
 CONF_DE_PIN = "de_pin"
 CONF_GHOST_ADDRESS = "ghost_address"
-CONF_PACK_COUNT = "pack_count"
-CONF_PACK1_ADDRESS = "pack1_address"
-CONF_PACK2_ADDRESS = "pack2_address"
+CONF_GHOST_CAPACITY_AH = "ghost_capacity_ah"
+CONF_PACK_ADDRESSES = "pack_addresses"
 CONF_CELL_FULL_LOW_MV = "cell_full_low_mv"
 CONF_CELL_BALANCE_TOLERANCE_MV = "cell_balance_tolerance_mv"
 CONF_CELL_FULL_MAX_TEMP_C = "cell_full_max_temp_c"
@@ -28,23 +31,20 @@ CONF_PACK_STALE_TIMEOUT_SECONDS = "pack_stale_timeout_seconds"
 
 
 def _validate_unique_addresses(config):
-    pack_count = config[CONF_PACK_COUNT]
-    addresses = [
-        (CONF_GHOST_ADDRESS, config[CONF_GHOST_ADDRESS]),
-        (CONF_PACK1_ADDRESS, config[CONF_PACK1_ADDRESS]),
-    ]
-    # pack2_address is only meaningful (and only needs to be distinct) in 2-pack mode - in
-    # single-pack mode it's ignored entirely by the component, so a collision there is harmless
-    if pack_count >= 2:
-        addresses.append((CONF_PACK2_ADDRESS, config[CONF_PACK2_ADDRESS]))
+    # (label, address) pairs - the ghost plus every configured real pack, in order. Every one of
+    # these has to be a distinct RS485 address, or two devices will answer the same poll and
+    # collide on the bus (this is exactly the bug fixed for address 0 - see is_query_for_us_()).
+    addresses = [(CONF_GHOST_ADDRESS, config[CONF_GHOST_ADDRESS])]
+    for i, address in enumerate(config[CONF_PACK_ADDRESSES]):
+        addresses.append((f"{CONF_PACK_ADDRESSES}[{i}] (pack {i + 1})", address))
 
     seen = {}
     for key, address in addresses:
         if address in seen:
             raise cv.Invalid(
                 f"'{key}' and '{seen[address]}' are both set to address {address} - the "
-                "ghost, pack 1 and pack 2 each need their own unique RS485 address, or the "
-                "ghost and a real pack will collide on the bus"
+                "ghost and every real pack each need their own unique RS485 address, or two "
+                "of them will collide on the bus"
             )
         seen[address] = key
     return config
@@ -56,21 +56,32 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(JkBmsGhostBattery),
             cv.Optional(CONF_DE_PIN): pins.gpio_output_pin_schema,
             cv.Optional(CONF_GHOST_ADDRESS, default=15): cv.int_range(min=1, max=247),
-            # 1 or 2 real packs. In single-pack mode, pack2_address below is ignored entirely -
-            # the release/re-arm logic and the average sensors all work off pack1 alone.
-            cv.Optional(CONF_PACK_COUNT, default=2): cv.one_of(1, 2, int=True),
-            cv.Optional(CONF_PACK1_ADDRESS, default=0): cv.int_range(min=0, max=247),
-            cv.Optional(CONF_PACK2_ADDRESS, default=1): cv.int_range(min=0, max=247),
-            # every cell on both packs must be at/above this voltage (mV)...
+            # nominal/remaining capacity the ghost reports once released - match your real bank's
+            # actual capacity instead of the reference battery's own 36Ah
+            cv.Optional(CONF_GHOST_CAPACITY_AH, default=36): cv.int_range(min=1, max=2000),
+            # one RS485 address per real pack, in order - pack_addresses[0] is "pack 1" everywhere
+            # else (entity names, dump_config, log messages), pack_addresses[1] is "pack 2", and so
+            # on. How many packs you have is simply how many addresses you list here - up to
+            # MAX_PACKS (8); the release/re-arm/averaging logic and every per-pack sensor all work
+            # the same way regardless of how many that ends up being.
+            cv.Optional(CONF_PACK_ADDRESSES, default=[0, 1]): cv.All(
+                cv.ensure_list(cv.int_range(min=0, max=247)),
+                cv.Length(
+                    min=1,
+                    max=MAX_PACKS,
+                    msg=f"pack_addresses must list between 1 and {MAX_PACKS} real pack addresses",
+                ),
+            ),
+            # every cell on every configured pack must be at/above this voltage (mV)...
             cv.Optional(CONF_CELL_FULL_LOW_MV, default=3460): cv.int_range(min=2500, max=4200),
             # ...AND each pack's own highest-lowest cell spread must be within this many mV -
             # together these two conditions mean "full and balanced"
             cv.Optional(CONF_CELL_BALANCE_TOLERANCE_MV, default=20): cv.int_range(min=1, max=200),
-            # release is refused if either pack is hotter than this, even if voltage/balance are
-            # otherwise fine. Set to 0 to disable this check.
+            # release is refused if any configured pack is hotter than this, even if
+            # voltage/balance are otherwise fine. Set to 0 to disable this check.
             cv.Optional(CONF_CELL_FULL_MAX_TEMP_C, default=50): cv.int_range(min=0, max=100),
-            # once released to 100%, the ghost drops back to 0% as soon as pack1 or pack2's own
-            # reported SoC falls to (or below) this percentage
+            # once released to 100%, the ghost drops back to 0% as soon as any configured pack's
+            # own reported SoC falls to (or below) this percentage
             cv.Optional(CONF_RESET_SOC_PERCENT, default=99): cv.int_range(min=0, max=100),
             # safety backstop: release the hold after this many minutes even without confirmed
             # cell balance, so a wiring/address mistake can't cause indefinite overcharge.
@@ -100,9 +111,11 @@ async def to_code(config):
         cg.add(var.set_de_pin(de_pin))
 
     cg.add(var.set_ghost_address(config[CONF_GHOST_ADDRESS]))
-    cg.add(var.set_pack_count(config[CONF_PACK_COUNT]))
-    cg.add(var.set_pack1_address(config[CONF_PACK1_ADDRESS]))
-    cg.add(var.set_pack2_address(config[CONF_PACK2_ADDRESS]))
+    cg.add(var.set_ghost_capacity_ah(config[CONF_GHOST_CAPACITY_AH]))
+    pack_addresses = config[CONF_PACK_ADDRESSES]
+    cg.add(var.set_pack_count(len(pack_addresses)))
+    for i, address in enumerate(pack_addresses):
+        cg.add(var.set_pack_address(i, address))
     cg.add(var.set_cell_full_low_mv(config[CONF_CELL_FULL_LOW_MV]))
     cg.add(var.set_cell_balance_tolerance_mv(config[CONF_CELL_BALANCE_TOLERANCE_MV]))
     cg.add(var.set_cell_full_max_temp_c(config[CONF_CELL_FULL_MAX_TEMP_C]))

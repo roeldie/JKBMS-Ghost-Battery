@@ -56,17 +56,22 @@ jkbms_ghost_battery:
   # and wire it to the tied-together DE+RE pins:
   # de_pin: GPIO4
   ghost_address: 15      # RS485 address to spoof - must have no physical battery here
-  pack_count: 2          # 1 or 2 - set to 1 if you only have a single real pack (pack2_address
-                          # below is then ignored entirely, no need to remove it)
-  pack1_address: 0       # real pack 1 / master BMS RS485 address - verify your dip switch setting
-  pack2_address: 1       # real pack 2 RS485 address - verify your dip switch setting
-  cell_full_low_mv: 3460       # every cell on both packs must be >= this voltage (mV)...
+  ghost_capacity_ah: 36  # reported nominal/remaining capacity once released - match your real
+                          # bank's actual capacity, not the reference battery's own 36Ah
+  pack_addresses: [0, 1] # one RS485 address per real pack, in order - verify each pack's own dip
+                          # switch setting. How many packs you have is just how many addresses you
+                          # list here (1 to 8): a single-pack setup is just `pack_addresses: [0]`,
+                          # a four-pack array is `pack_addresses: [0, 1, 2, 3]`, and so on. Pack 1
+                          # is always the RS485 master (README's "problem this solves" - its
+                          # address defaults to 0), the rest are whatever your other packs are
+                          # dip-switched to.
+  cell_full_low_mv: 3460       # every cell on every configured pack must be >= this voltage (mV)...
   cell_balance_tolerance_mv: 20 # ...AND each pack's own max-min cell spread must be within this
                                  # many mV - together, "full" and "balanced"
-  cell_full_max_temp_c: 50    # ...AND neither pack may be hotter than this (C) - release is
+  cell_full_max_temp_c: 50    # ...AND no configured pack may be hotter than this (C) - release is
                                # refused even if voltage/balance are fine. Set to 0 to disable.
-  reset_soc_percent: 99   # once released, ghost drops back to 0% as soon as pack1 or pack2's own
-                           # reported SoC falls to this percentage (ie. discharging has started)
+  reset_soc_percent: 99   # once released, ghost drops back to 0% as soon as any configured pack's
+                           # own reported SoC falls to this percentage (ie. discharging has started)
   hold_failsafe_minutes: 240  # safety backstop: release to 100% after this long even without
                                # confirmed balance, so a wiring/address mistake can't cause
                                # indefinite overcharge. Set to 0 to disable.
@@ -103,11 +108,11 @@ sensor:
     pack2_power:
       name: "Pack 2 power"
     total_power:
-      name: "Total power"   # pack1 + pack2 power, straight sum
+      name: "Total power"   # every configured pack's power, straight sum
     total_current:
-      name: "Total current"   # pack1 + pack2 current, straight sum
+      name: "Total current"   # every configured pack's current, straight sum
     total_cell_voltage_diff:
-      name: "Total cell voltage diff"   # highest cell minus lowest cell across ALL cells, both packs
+      name: "Total cell voltage diff"   # highest cell minus lowest cell across ALL cells, all packs
     pack1_temperature:
       name: "Pack 1 temperature"
     pack2_temperature:
@@ -117,9 +122,9 @@ sensor:
     pack2_soc:
       name: "Pack 2 SoC"
     average_soc:
-      name: "Average SoC"   # (pack1 + pack2) / 2
+      name: "Average SoC"   # average across every configured pack
     average_voltage:
-      name: "Average voltage"   # (pack1 + pack2) / 2
+      name: "Average voltage"   # average across every configured pack
     ghost_fake_soc:
       name: "Ghost fake SoC"   # what the ghost is currently telling the bus: 0 or 100
     pack1_rcv_voltage:
@@ -135,6 +140,24 @@ sensor:
       name: "Total charge energy"     # for the Home Assistant Energy dashboard - resets on reboot
     total_discharge_energy:
       name: "Total discharge energy"
+    # state of health and fault count come straight from the real pack, independent of whatever
+    # SoC the ghost is currently telling the inverter - useful assurance even while it's holding
+    pack1_soh:
+      name: "Pack 1 SOH"
+    pack2_soh:
+      name: "Pack 2 SOH"
+    pack1_fault_count:
+      name: "Pack 1 fault count"   # rising count = pack 1 has logged a fault since power-up
+    pack2_fault_count:
+      name: "Pack 2 fault count"
+    pack1_cycle_count:
+      name: "Pack 1 cycle count"
+    pack2_cycle_count:
+      name: "Pack 2 cycle count"
+    pack1_balance_current:
+      name: "Pack 1 balance current"   # current being shunted between cells to balance them
+    pack2_balance_current:
+      name: "Pack 2 balance current"
     # individual cell voltages - all 32 optional, add/remove any you don't want
     pack1_cell_1:
       name: "Pack 1 Cell 1"
@@ -206,6 +229,12 @@ text_sensor:
     hold_status:
       name: "Ghost hold status"   # why the ghost is currently holding or released, eg. "released -
                                    # balanced and full" or "holding - re-armed (data stale)"
+    # "none", or a comma-separated list of the real pack's own active alarm/protection bits -
+    # this is the truth about the real BMS, regardless of what the ghost is telling the inverter
+    pack1_protection_flags:
+      name: "Pack 1 protection flags"
+    pack2_protection_flags:
+      name: "Pack 2 protection flags"
 
 binary_sensor:
   - platform: jkbms_ghost_battery
@@ -214,6 +243,25 @@ binary_sensor:
                                    # pack_stale_timeout_seconds - check wiring/address/power
     pack2_data_stale:
       name: "Pack 2 data stale"
+    # on = the real pack's own MOS is currently allowing that direction of current. Off is a
+    # real, expected state (eg. discharge MOS off when nothing is drawing current, or when the
+    # pack has actually cut off due to a protection trip) - cross-check against the protection
+    # flags/active sensors below rather than treating "off" as an alarm by itself.
+    pack1_charge_mos:
+      name: "Pack 1 charge MOS"
+    pack2_charge_mos:
+      name: "Pack 2 charge MOS"
+    pack1_discharge_mos:
+      name: "Pack 1 discharge MOS"
+    pack2_discharge_mos:
+      name: "Pack 2 discharge MOS"
+    # on = the real pack is reporting at least one of its own alarm/protection bits - independent
+    # of the ghost's spoofed SoC, so this stays a genuine "is something actually wrong" check even
+    # while the ghost is holding at 0% or forcing 100%
+    pack1_protection_active:
+      name: "Pack 1 protection active"
+    pack2_protection_active:
+      name: "Pack 2 protection active"
 
 switch:
   - platform: jkbms_ghost_battery

@@ -30,31 +30,39 @@ against [txubelaxu/esphome-jk-bms](https://github.com/txubelaxu/esphome-jk-bms).
 ## How the release logic works
 
 This variant gates the SoC release on real per-cell data instead of a fixed timer. Works with
-either one or two real packs — set `pack_count` accordingly (see
-[Configuration reference](#configuration-reference)); everything below just says "the pack(s)"
-since the logic is identical either way, minus pack 2 in single-pack mode:
+anywhere from 1 to 8 real packs — just list one RS485 address per pack in `pack_addresses` (see
+[Configuration reference](#configuration-reference)); everything below just says "every configured
+pack" since the logic is identical no matter how many that ends up being:
 
 1. The ghost starts **holding** (reports 0% SoC, 0 Ah remaining) — this blocks the array from
    ever reading 100%.
-2. It passively sniffs the real pack(s)' own status responses as they pass by on the bus and
+2. It passively sniffs the real packs' own status responses as they pass by on the bus and
    tracks each pack's min/max cell voltage and reported SoC.
 3. Once **every cell on every configured pack** is at or above `cell_full_low_mv` (default 3.46V)
    **and** each pack's own highest-lowest cell spread is within `cell_balance_tolerance_mv`
-   (default 20mV) **and** neither pack is hotter than `cell_full_max_temp_c` (default 50°C), the
-   ghost releases: it reports 100% SoC and full capacity, so the inverter gets a genuine
+   (default 20mV) **and** no configured pack is hotter than `cell_full_max_temp_c` (default 50°C),
+   the ghost releases: it reports 100% SoC and full capacity, so the inverter gets a genuine
    full-charge signal and stops charging.
-4. As soon as any configured pack's own reported SoC drops to `reset_soc_percent` (default 99%) —
+4. It also releases immediately, regardless of balance, if **any** configured pack's own **charge
+   MOS is off** (`pack1_charge_mos`, `pack2_charge_mos`, ... — see [Home Assistant
+   entities](#home-assistant-entities)). If that pack's real BMS has already cut off charging
+   itself (cell OVP, over-temp, whatever tripped it), no current can flow no matter what the ghost
+   reports, so holding at 0% to chase a "confirmed full and balanced" release that can't happen
+   serves no purpose — the inverter should be told to stop trying. This deliberately only looks at
+   the charge MOS state, not the full protection/alarm bitfield (`pack1_protection_flags` etc.
+   stay informational-only) - see the code comment on this check in `evaluate_hold_()` for why.
+5. As soon as any configured pack's own reported SoC drops to `reset_soc_percent` (default 99%) —
    ie. discharging has started — the ghost re-arms back to holding, ready for the next cycle.
-5. `hold_failsafe_minutes` (default 240) is a safety backstop: if balance/full can never be
+6. `hold_failsafe_minutes` (default 240) is a safety backstop: if balance/full can never be
    confirmed (wrong address, wiring problem), the hold releases anyway after this long, so a
    configuration mistake can't cause indefinite overcharge. Set to `0` to disable.
-6. `pack_stale_timeout_seconds` (default 30) guards against acting on stale data: if a configured
+7. `pack_stale_timeout_seconds` (default 30) guards against acting on stale data: if a configured
    pack hasn't sent a fresh status frame within this window (BMS reset, wiring fault, pack
    physically disconnected), its last cached reading is no longer trusted — the ghost won't
    release on the strength of it, and if it had already released, it re-arms back to holding as a
    precaution. Real packs are normally polled every few seconds, so this should stay well above
    that under normal conditions.
-7. The hold/release state (step 1 vs step 3) is saved to flash every time it changes, and
+8. The hold/release state (step 1 vs step 3) is saved to flash every time it changes, and
    restored on boot. A routine restart (OTA update, brownout, crash) doesn't force a fresh
    `hold_failsafe_minutes` wait if the pack(s) were already confirmed full and balanced moments
    earlier — the ghost comes back up already released instead of re-holding from scratch. A
@@ -64,10 +72,11 @@ since the logic is identical either way, minus pack 2 in single-pack mode:
 
 This controls a real signal in a real charging system. Before trusting it unattended:
 
-- **Verify `pack1_address` and `pack2_address`** against your BMS's actual dip switch settings.
-  Wrong addresses mean the ghost never sees real data and never releases.
-- **Watch the logs first.** With `logger: level: DEBUG`, confirm you see `Pack 0x00 cells: ...`
-  and `Pack 0x01 cells: ...` for both real packs before leaving it running unattended.
+- **Verify every entry in `pack_addresses`** against your BMS's actual dip switch settings. Wrong
+  addresses mean the ghost never sees real data from that pack and never releases.
+- **Watch the logs first.** With `logger: level: DEBUG`, confirm you see a `Pack 0x.. cells: ...`
+  line for every pack you configured (`Pack 0x00 cells: ...`, `Pack 0x01 cells: ...`, and so on)
+  before leaving it running unattended.
 - **Tune `cell_full_low_mv` and `cell_balance_tolerance_mv` to your cells**, not the defaults
   here — they were reverse-engineered from one specific pack (see
   [Protocol notes](#protocol-notes)) and won't necessarily suit yours.
@@ -199,15 +208,18 @@ jkbms_ghost_battery:
   # old-style MAX485 module with separate DE+RE pins tied together:
   # de_pin: GPIO4
   ghost_address: 15       # must be an address with no physical battery
-  pack_count: 2           # 1 or 2 - set to 1 for a single-pack setup (pack2_address below is
-                           # then ignored entirely; no need to remove it)
-  pack1_address: 0        # real master BMS address
-  pack2_address: 1        # real pack 2 address - verify against your dip switches
-  cell_full_low_mv: 3460        # every cell, both packs, must be at/above this voltage (mV)...
+  ghost_capacity_ah: 36   # reported nominal/remaining capacity once released - match your real
+                           # bank's actual capacity
+  pack_addresses: [0, 1]  # one RS485 address per real pack, in order - verify each pack's dip
+                           # switches. How many packs you have is just how many addresses you list
+                           # here (1 up to MAX_PACKS, 8): `[0]` for a single pack, `[0, 1, 2, 3]`
+                           # for four, etc. Pack 1 (index 0) is always the RS485 master.
+  cell_full_low_mv: 3460        # every cell, every configured pack, must be at/above this voltage
+                                 # (mV)...
   cell_balance_tolerance_mv: 20 # ...AND each pack's own max-min cell spread must be within this
                                  # many mV - together, "full" and "balanced"
-  cell_full_max_temp_c: 50      # ...AND neither pack may be hotter than this (C). 0 disables it
-  reset_soc_percent: 99   # re-arms the hold once pack1 or pack2's real SoC drops to this value
+  cell_full_max_temp_c: 50      # ...AND no configured pack may be hotter than this (C). 0 disables it
+  reset_soc_percent: 99   # re-arms the hold once any configured pack's real SoC drops to this value
   hold_failsafe_minutes: 240  # safety backstop; releases anyway if balance is never confirmed. 0 disables it
   pack_stale_timeout_seconds: 30  # a pack with no fresh data for this long is treated as unusable -
                                    # release is refused, and an already-released hold re-arms
@@ -239,11 +251,11 @@ sensor:
     pack2_power:
       name: "Pack 2 power"
     total_power:
-      name: "Total power"   # pack1 + pack2 power, straight sum
+      name: "Total power"   # every configured pack's power, straight sum
     total_current:
-      name: "Total current"   # pack1 + pack2 current, straight sum
+      name: "Total current"   # every configured pack's current, straight sum
     total_cell_voltage_diff:
-      name: "Total cell voltage diff"   # highest cell minus lowest cell across ALL cells, both packs
+      name: "Total cell voltage diff"   # highest cell minus lowest cell across ALL cells, all packs
     pack1_temperature:
       name: "Pack 1 temperature"
     pack2_temperature:
@@ -253,9 +265,9 @@ sensor:
     pack2_soc:
       name: "Pack 2 SoC"
     average_soc:
-      name: "Average SoC"   # (pack1 + pack2) / 2
+      name: "Average SoC"   # average across every configured pack
     average_voltage:
-      name: "Average voltage"   # (pack1 + pack2) / 2
+      name: "Average voltage"   # average across every configured pack
     ghost_fake_soc:
       name: "Ghost fake SoC"   # what the ghost is currently telling the bus: 0 or 100
     pack1_rcv_voltage:
@@ -271,8 +283,29 @@ sensor:
       name: "Total charge energy"     # for the Home Assistant Energy dashboard - resets on reboot
     total_discharge_energy:
       name: "Total discharge energy"
-    # individual cell voltages - pack1_cell_1 .. pack1_cell_16, pack2_cell_1 .. pack2_cell_16
-    # (32 total, all optional). See jkbms-ghost-battery.yaml for the full list.
+    # protection/health sensors, sourced from the real pack's own status frame - see "Home
+    # Assistant entities" below for what each one means and why they matter independent of the
+    # ghost's own spoofed SoC
+    pack1_soh:
+      name: "Pack 1 SOH"
+    pack2_soh:
+      name: "Pack 2 SOH"
+    pack1_fault_count:
+      name: "Pack 1 fault count"
+    pack2_fault_count:
+      name: "Pack 2 fault count"
+    pack1_cycle_count:
+      name: "Pack 1 cycle count"
+    pack2_cycle_count:
+      name: "Pack 2 cycle count"
+    pack1_balance_current:
+      name: "Pack 1 balance current"
+    pack2_balance_current:
+      name: "Pack 2 balance current"
+    # individual cell voltages - pack1_cell_1 .. pack1_cell_16, pack2_cell_1 .. pack2_cell_16, and
+    # so on for every pack up to pack8_cell_16 (all optional, whether or not you've actually
+    # configured that many packs - unused ones just have nothing to publish to). This 2-pack
+    # example only lists pack1/pack2; see jkbms-ghost-battery.yaml for the full list.
     # These are entity_category: diagnostic, so Home Assistant groups them into the device's
     # collapsible "Diagnostic" section instead of the main sensor list.
     pack1_cell_1:
@@ -285,6 +318,10 @@ text_sensor:
   - platform: jkbms_ghost_battery
     hold_status:
       name: "Ghost hold status"   # why the ghost is currently holding or released
+    pack1_protection_flags:
+      name: "Pack 1 protection flags"
+    pack2_protection_flags:
+      name: "Pack 2 protection flags"
 
 binary_sensor:
   - platform: jkbms_ghost_battery
@@ -292,6 +329,18 @@ binary_sensor:
       name: "Pack 1 data stale"   # on = no fresh reading within pack_stale_timeout_seconds
     pack2_data_stale:
       name: "Pack 2 data stale"
+    pack1_charge_mos:
+      name: "Pack 1 charge MOS"
+    pack2_charge_mos:
+      name: "Pack 2 charge MOS"
+    pack1_discharge_mos:
+      name: "Pack 1 discharge MOS"
+    pack2_discharge_mos:
+      name: "Pack 2 discharge MOS"
+    pack1_protection_active:
+      name: "Pack 1 protection active"
+    pack2_protection_active:
+      name: "Pack 2 protection active"
 
 switch:
   - platform: jkbms_ghost_battery
@@ -310,28 +359,31 @@ omit any you don't want.
 
 ## Home Assistant entities
 
-**`sensor:`** — 60 sensors, read passively off real traffic already on the bus (the ghost never
-queries anything itself for these):
-- Per pack (1 and 2): min/max cell voltage, cell voltage diff (max - min, ie. how far out of
-  balance that pack currently is), total voltage, current (positive = charging, negative =
+**`sensor:`** — 68 sensors in this README's 2-pack example config (13 per-pack sensors × 2 packs +
+16 cells × 2 packs + 4 global ones); every per-pack sensor scales up automatically to
+`pack3_*` .. `pack8_*` if you list more addresses in `pack_addresses`, read passively off real
+traffic already on the bus (the ghost never queries anything itself for these):
+- Per configured pack (`pack1_*`, `pack2_*`, ... up to `pack8_*` depending on how many addresses
+  you listed in `pack_addresses`): min/max cell voltage, cell voltage diff (max - min, ie. how far
+  out of balance that pack currently is), total voltage, current (positive = charging, negative =
   discharging), power (voltage × current, kW), temperature, real SoC, and all 16 individual
   cell voltages (`entity_category: diagnostic`, grouped into Home Assistant's collapsible
   "Diagnostic" section on the device page instead of cluttering the main sensor list). Sourced
   from the packs' own status responses, which something on the bus already polls every few
   seconds.
-- **`average_soc`** and **`average_voltage`** — the mean of pack 1 and pack 2 (eg. 50% + 60% →
-  55%), only published once both packs have been seen at least once.
-- **`total_power`** and **`total_current`** — the straight sum of both packs (not an average),
-  same "once both packs have been seen" gating.
+- **`average_soc`** and **`average_voltage`** — the mean across every configured pack, only
+  published once all of them have been seen at least once.
+- **`total_power`** and **`total_current`** — the straight sum of every configured pack (not an
+  average), same "once every pack has been seen" gating.
 - **`total_cell_voltage_diff`** — highest cell minus lowest cell across **all** cells on **all**
   configured packs (not per-pack like the diffs above) — the single number that tells you how
   out of balance the whole array is.
 - **`ghost_fake_soc`** — the direct answer to "what is the fake battery doing right now": exactly
   the 0 or 100 the ghost is telling the bus at that moment, updated every time it answers a status
   request.
-- **`pack1_rcv_voltage`** / **`pack2_rcv_voltage`** — each pack's own RCV (rated charge voltage)
-  setting. Read-only and truly passive: the ghost never requests a settings frame itself, so
-  these only update if something else on your bus (eg. the JK app, Solar Assistant) happens to
+- **`pack1_rcv_voltage`**, **`pack2_rcv_voltage`**, ... — each pack's own RCV (rated charge
+  voltage) setting. Read-only and truly passive: the ghost never requests a settings frame itself,
+  so these only update if something else on your bus (eg. the JK app, Solar Assistant) happens to
   query that pack's settings. They may simply never update on your setup - that's expected, not
   a bug.
 - **`bus_error_count`** — counts CRC failures on frames that were otherwise structured like a
@@ -346,6 +398,16 @@ queries anything itself for these):
   Assistant's Energy dashboard as battery storage sensors. Like any in-memory counter on this
   device, both reset to 0 on every reboot — HA's `total_increasing` state class treats that as a
   normal meter reset, the same way a real energy meter behaves after a power cut.
+- **`pack1_soh`**, **`pack2_soh`**, ... — each pack's own state-of-health percentage, straight off
+  its status frame. A slow decline over months/years is normal aging; a sudden drop is worth
+  investigating regardless of what the ghost is doing. `entity_category: diagnostic`.
+- **`pack1_fault_count`**, **`pack2_fault_count`**, ... — a rising count the pack itself keeps of
+  faults it has logged since power-up. A steady value is reassuring; a jump means something
+  tripped even if the condition has since cleared. `entity_category: diagnostic`.
+- **`pack1_cycle_count`**, **`pack2_cycle_count`**, ... — full-cycle-equivalent count, straight off
+  the pack's own status frame. `entity_category: diagnostic`.
+- **`pack1_balance_current`**, **`pack2_balance_current`**, ... — current currently being shunted
+  between cells within that pack to balance them. `entity_category: diagnostic`.
 
 **`text_sensor:`**
 - **`hold_status`** — the "why" behind `ghost_fake_soc`'s raw "what". Reports a short reason
@@ -354,12 +416,29 @@ queries anything itself for these):
   `"holding - re-armed (data stale)"`. Starts as `"holding - waiting for pack data"` on a
   first-ever boot, or `"released (restored from flash)"` if the saved state from before a reboot
   was already released.
+- **`pack1_protection_flags`**, **`pack2_protection_flags`**, ... (one per configured pack) —
+  `"none"`, or a comma-separated list of whichever of that pack's own alarm/protection bits are
+  currently set (eg. `"cell OVP, discharge OCP"`). This comes straight from the real BMS and has
+  nothing to do with what the ghost is telling the inverter, so it stays meaningful as a "is my
+  real battery actually okay" check even while the ghost is holding at 0% or forcing 100%.
+  `entity_category: diagnostic`.
 
-**`binary_sensor:`**
-- **`pack1_data_stale`** / **`pack2_data_stale`** — on when that pack hasn't sent a fresh status
-  frame within `pack_stale_timeout_seconds`. `entity_category: diagnostic`, so these show up in
-  the device's collapsible "Diagnostic" section - a good target for a Home Assistant notification
-  if you want to be alerted to a wiring or address problem instead of just watching the log.
+**`binary_sensor:`** (one of each per configured pack)
+- **`pack1_data_stale`**, **`pack2_data_stale`**, ... — on when that pack hasn't sent a fresh
+  status frame within `pack_stale_timeout_seconds`. `entity_category: diagnostic`, so these show
+  up in the device's collapsible "Diagnostic" section - a good target for a Home Assistant
+  notification if you want to be alerted to a wiring or address problem instead of just watching
+  the log.
+- **`pack1_charge_mos`** / **`pack1_discharge_mos`** (and `pack2_*`, ... for every other configured
+  pack) — on when the real pack's own MOS is currently allowing that direction of current. Off is
+  a normal, expected state on its own (eg. discharge MOS off with nothing drawing current) -
+  cross-check against `protection_active`/`protection_flags` below rather than treating "off" as
+  an alarm by itself. `entity_category: diagnostic`.
+- **`pack1_protection_active`**, **`pack2_protection_active`**, ... — on when that pack is
+  reporting at least one of its own alarm/protection bits (see `protection_flags` above).
+  Independent of `ghost_fake_soc`, so this is a genuine "is something actually wrong with the real
+  battery" check regardless of what the ghost is currently telling the bus.
+  `entity_category: diagnostic`.
 
 **`switch:` + `number:`** — a manual override, deliberately built as a two-step interlock so it
 can't be triggered by accident:
@@ -389,6 +468,13 @@ LiFePO4, address `0x0F`) and cross-checked against
 | SoC | 173 | 1 byte, percent |
 | Remaining capacity | 174–177 | 4 bytes little-endian, mAh |
 | Total capacity | 178–181 | 4 bytes little-endian, mAh |
+| Alarm/protection bits | 166–169 | 4 bytes little-endian, one bit per fault, 1 = active |
+| Balance current | 170–171 | 2 bytes little-endian signed, mA |
+| Cycle count | 182–185 | 4 bytes little-endian, full-cycle-equivalent count |
+| State of health (SOH) | 190 | 1 byte, percent |
+| Charge MOS | 198 | 1 byte, 0 = off (charge cut off), 1 = on |
+| Discharge MOS | 199 | 1 byte, 0 = off (discharge cut off), 1 = on |
+| Fault count | 266 | 1 byte, rising count = a fault has been logged |
 | Internal payload checksum | 299 | 1 byte, sum of bytes 0–298 mod 256 |
 | Source address (trailer echo) | 300 | 1 byte |
 | Trailer CRC16 | 306–307 | Modbus CRC16 over bytes 300–305 only (not the whole frame) |
@@ -396,11 +482,32 @@ LiFePO4, address `0x0F`) and cross-checked against
 The total-pack-voltage field was cross-checked by summing the 16 individual cell voltages — they
 matched to within 1mV on the reference capture, confirming both fields.
 
+The alarm/protection bits, SOH, MOS status, fault-count, cycle-count and balance-current offsets
+above were cross-checked against a third-party JK 55AA protocol reference
+([Gobel-Battery-HA-Addon](https://github.com/fancyui/Gobel-Battery-HA-Addon/blob/main/JK-BMS-55AA-Protocol_EN.md)),
+which independently documents this project's own already-verified offsets (150/158/162/173)
+identically - that agreement is what gives confidence in the previously-unused ones too. As with
+the rest of this table, these haven't been individually re-verified against a live capture from
+every pack model, so treat a genuinely surprising reading (eg. a fault count that jumps constantly)
+as worth double-checking rather than gospel.
+
+Bit 0-23 of the alarm field are individually named (battery/cell over/under-voltage, over-current,
+over-temperature, etc. - see `decode_protection_flags_()` in `jkbms_ghost_battery.cpp` for the
+full list); any set bit above 23 isn't in the reference doc but is still reported as
+`"other (bit N)"` rather than silently dropped.
+
 Bytes 300–305 are an echo of the query that was sent (address, function, subfunction, frame type,
 `0x00`, `0x01`), and bytes 306–307 are a Modbus CRC16 over just those 6 bytes — a completely
 separate checksum from the payload one at byte 299. Any time byte 300 (the source address) is
 patched — eg. to make the ghost's responses reflect a non-default `ghost_address` — this trailer
 CRC has to be recomputed too, or a master that validates response CRCs will reject the frame.
+
+The internal payload checksum at byte 299 is a much simpler plain byte sum (see
+`recompute_checksum_()`), but needs the same discipline: any time a byte inside 0-298 is patched
+at runtime - SoC, remaining/total capacity, temperature - it has to be recomputed too, or a master
+that validates response checksums will reject the frame outright. `ghost_capacity_ah`'s runtime
+patch (remaining capacity in frame2, total/nominal capacity in both frame1 and frame2) is the
+newest thing that touches this range, alongside the existing SoC/temperature patches.
 
 The settings frame (`0x1E`, response type `0x01`) has a different, unshifted byte layout:
 
