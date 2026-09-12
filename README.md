@@ -8,6 +8,8 @@ Runs on a generic ESP32 + a TTL-to-RS485 transceiver (this build uses a JZK STKS
 module — an old-style MAX485 module with manual DE/RE control works too), flashes and updates
 through the [ESPHome](https://esphome.io) Dashboard, and integrates natively with Home Assistant.
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-ffdd00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/roeldie)
+
 ## The problem this solves
 
 A JK master BMS (RS485 address `0`) aggregates the whole parallel battery array and reports a
